@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Airloom</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+</head>
+<body>
+  <div id="splash" class="splash">
+    <div class="splash-content">
+      <h1>Airloom</h1>
+      <p>Sculpt sound with your hands</p>
+      <button id="startBtn">Click to Begin</button>
+    </div>
+  </div>
+
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div id="hud" class="hud">
+    <div class="hud-row">Hand Detected: <span id="hudDetected">No</span></div>
+    <div class="hud-row">Palm X: <span id="hudPalmX">-</span></div>
+    <div class="hud-row">Palm Y: <span id="hudPalmY">-</span></div>
+    <div class="hud-row">Open: <span id="hudOpen">-</span></div>
+    <div class="hud-row">Pinch Dist: <span id="hudPinch">-</span></div>
+    <div class="hud-row">Hand Speed: <span id="hudSpeed">-</span></div>
+    <div class="hud-row">Frequency: <span id="hudFreq">-</span> Hz</div>
+    <div class="hud-row">Note: <span id="hudNote">-</span></div>
+  </div>
+
+  <script src="airloom.js"></script>
+</body>
+</html>
