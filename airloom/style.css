@@ -116,7 +116,7 @@ body::before {
 .hud {
   position: absolute;
   top: 10px;
-  left: 10px;
+  right: 10px;
   background: rgba(0, 0, 0, 0.7);
   color: #0f0;
   padding: 10px;
@@ -139,4 +139,63 @@ body::before {
   text-align: right;
   min-width: 80px;
   color: #0f0;
+}
+
+#hudChord {
+  font-weight: bold;
+  color: #fff;
+}
+
+.fx-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.3rem 1rem;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  text-align: left;
+  font-size: 12px;
+  color: #aaa;
+}
+
+.fx-title {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  color: #0f0;
+  margin-top: 0.5rem;
+}
+
+.fx-panel input[type=range] {
+  width: 100%;
+  accent-color: #0f0;
+}
+
+#recBtn {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #cc0000;
+  color: #fff;
+  border: none;
+  border-radius: 50px;
+  padding: 10px 28px;
+  font-size: 14px;
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+  cursor: pointer;
+  z-index: 20;
+  display: none;
+  letter-spacing: 0.1em;
+}
+
+#recBtn.recording {
+  background: #ff0000;
+  box-shadow: 0 0 12px rgba(255, 0, 0, 0.7);
+  animation: recPulse 1s infinite;
+}
+
+@keyframes recPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
