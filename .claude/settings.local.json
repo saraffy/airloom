@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pkill -9 node)",
+      "Bash(node server.js)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Fix setGoal clearing all data instead of just old roadmap data *)",
+      "Bash(curl -s http://localhost:3000/index.html)",
+      "Bash(git push *)",
+      "Bash(npm start *)",
+      "Bash(npm install *)"
+    ]
+  }
+}
