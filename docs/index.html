@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Airloom</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/handtrack.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+</head>
+<body>
+  <script>
+    const testCanvas = document.createElement('canvas');
+    const gl = testCanvas.getContext('webgl') || testCanvas.getContext('experimental-webgl');
+    if (!gl) {
+      console.error('❌ WebGL NOT SUPPORTED on this system');
+    } else {
+      console.log('✅ WebGL IS SUPPORTED');
+    }
+  </script>
+
+  <div id="splash" class="splash">
+    <div class="splash-content">
+      <h1>Airloom</h1>
+      <p>Sculpt sound with your hands</p>
+      <p style="font-size: 14px; color: #aaa;">Wear bright red gloves or paint your hands</p>
+      <p style="font-size: 12px; color: #888; margin-bottom: 1rem;">Choose a scale:</p>
+      <select id="scaleSelect" style="padding: 8px; margin-bottom: 1.5rem; font-size: 14px; background: #222; color: #0f0; border: 1px solid #0f0; border-radius: 4px; cursor: pointer;">
+        <option value="C Major">C Major (bright, happy)</option>
+        <option value="G Major">G Major (warm)</option>
+        <option value="A Minor">A Minor (emotional)</option>
+        <option value="F Major">F Major (smooth, warm)</option>
+        <option value="C Pentatonic">C Pentatonic (5-note, very forgiving)</option>
+        <option value="A Pentatonic">A Pentatonic (5-note, soulful)</option>
+        <option value="A Blues">A Blues (gritty)</option>
+      </select>
+
+      <p style="font-size: 12px; color: #888; margin-bottom: 0.5rem;">Choose an instrument:</p>
+      <select id="instrumentSelect" style="padding: 8px; margin-bottom: 1.5rem; font-size: 14px; background: #222; color: #0f0; border: 1px solid #0f0; border-radius: 4px; cursor: pointer;">
+        <option value="ethereal">Ethereal Synth (shimmering pad)</option>
+        <option value="organ">Organ (rich, sustained)</option>
+        <option value="piano">Classic Piano (bright, percussive)</option>
+      </select>
+
+      <p style="font-size: 12px; color: #888; margin-bottom: 0.5rem;">Choose an octave:</p>
+      <select id="octaveSelect" style="padding: 8px; margin-bottom: 1.5rem; font-size: 14px; background: #222; color: #0f0; border: 1px solid #0f0; border-radius: 4px; cursor: pointer;">
+        <option value="-2">Very Low</option>
+        <option value="-1">Low</option>
+        <option value="0" selected>Normal</option>
+        <option value="1">High</option>
+        <option value="2">Very High</option>
+      </select>
+
+      <p style="font-size: 12px; color: #888; margin-bottom: 0.5rem;">
+        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+          <input type="checkbox" id="chordSustainMode" style="cursor: pointer;">
+          Chord Sustain Mode (hand visible = always playing)
+        </label>
+      </p>
+
+      <p style="font-size: 12px; color: #888; margin-bottom: 1.5rem;">
+        <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+          <input type="checkbox" id="vocalMode" style="cursor: pointer;">
+          Vocal Mode (sing into mic — hand controls pitch + reverb)
+        </label>
+      </p>
+
+      <div class="fx-panel">
+        <div class="fx-title">REVERB</div>
+        <label>Decay <span id="reverbDecayVal">4.5s</span></label>
+        <input type="range" id="reverbDecay" min="0.5" max="6" step="0.5" value="4.5">
+        <label>Mix <span id="reverbWetVal">80%</span></label>
+        <input type="range" id="reverbWet" min="0" max="1" step="0.05" value="0.80">
+
+        <div class="fx-title" style="margin-top:0.8rem;">DELAY</div>
+        <label>Time <span id="delayTimeVal">0.375s</span></label>
+        <input type="range" id="delayTime" min="0" max="0.75" step="0.05" value="0.375">
+        <label>Feedback <span id="delayFeedbackVal">40%</span></label>
+        <input type="range" id="delayFeedback" min="0" max="0.85" step="0.05" value="0.4">
+        <label>Mix <span id="delayWetVal">30%</span></label>
+        <input type="range" id="delayWet" min="0" max="1" step="0.05" value="0.3">
+      </div>
+
+      <button id="startBtn">Click to Begin</button>
+    </div>
+  </div>
+
+  <script>
+    ['reverbDecay','reverbWet','delayTime','delayFeedback','delayWet'].forEach(id => {
+      const el = document.getElementById(id);
+      const lbl = document.getElementById(id + 'Val');
+      el.oninput = () => {
+        const v = parseFloat(el.value);
+        lbl.textContent = id.includes('Wet') || id.includes('Feedback')
+          ? Math.round(v * 100) + '%'
+          : v + 's';
+      };
+    });
+  </script>
+
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div id="hud" class="hud">
+    <div class="hud-row">Hand Detected: <span id="hudDetected">No</span></div>
+    <div class="hud-row">Palm X: <span id="hudPalmX">-</span></div>
+    <div class="hud-row">Palm Y: <span id="hudPalmY">-</span></div>
+    <div class="hud-row">Open: <span id="hudOpen">-</span></div>
+    <div class="hud-row">Pinch Dist: <span id="hudPinch">-</span></div>
+    <div class="hud-row">Hand Speed: <span id="hudSpeed">-</span></div>
+    <div class="hud-row">Frequency: <span id="hudFreq">-</span> Hz</div>
+    <div class="hud-row">Note: <span id="hudNote">-</span></div>
+    <div class="hud-row" style="margin-top: 0.5rem; border-top: 1px solid #0f0; padding-top: 0.5rem;">Playing: <span id="hudChord">-</span></div>
+  </div>
+
+  <button id="recBtn">● REC</button>
+
+  <script src="airloom.js"></script>
+</body>
+</html>
