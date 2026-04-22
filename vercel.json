@@ -1,4 +1,8 @@
 {
-  "buildCommand": "",
-  "outputDirectory": "airloom"
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/airloom/$1"
+    }
+  ]
 }
