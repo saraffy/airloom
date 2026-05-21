@@ -160,30 +160,25 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       const rawCtx = Tone.context.rawContext;
       const micSource = rawCtx.createMediaStreamSource(vocalMicStream);
       const micGain = rawCtx.createGain();
-      micGain.gain.value = 0.8;
+      micGain.gain.value = 0.7;
       micSource.connect(micGain);
 
-      vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
-      vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
-      vocalChorus.start();
+      const dryGain = rawCtx.createGain();
+      dryGain.gain.value = 1;
+      micGain.connect(dryGain);
 
-      console.log('Reverb object keys:', Object.keys(reverb).slice(0, 10));
-      console.log('reverb.input:', reverb.input);
-      console.log('reverb.node:', reverb.node);
-      console.log('reverb._reverb:', reverb._reverb);
+      dryGain.connect(rawCtx.destination);
 
-      micGain.connect(reverb.input);
-      reverb.connect(masterGain);
-
-      console.log('✅ Audio: Vocal Mode | Mic → Reverb');
+      console.log('✅ Audio: Vocal Mode | Mic → Delay → Reverb');
     } catch (err) {
       console.error('❌ Microphone error:', err.name, '-', err.message);
-      console.error('Stack:', err.stack);
       alert('Microphone error (' + err.name + '): ' + err.message);
       audioInitialized = false;
       return;
     }
 
+    vocalTremolo = null;
+    vocalChorus = null;
     directGain = null;
     harmonyShifts = [];
     harmonyGains = [];
