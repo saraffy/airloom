@@ -167,7 +167,13 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       dryGain.gain.value = 1;
       micGain.connect(dryGain);
 
-      dryGain.connect(rawCtx.destination);
+      try {
+        dryGain.connect(delay.input);
+        delay.connect(reverb);
+      } catch (e) {
+        console.warn('Could not connect to Tone nodes, using direct output:', e.message);
+        dryGain.connect(rawCtx.destination);
+      }
 
       console.log('✅ Audio: Vocal Mode | Mic → Delay → Reverb');
     } catch (err) {
