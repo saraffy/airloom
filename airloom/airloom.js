@@ -157,40 +157,23 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
 
   if (vocalModeEnabled) {
     try {
+      const rawCtx = Tone.context.rawContext;
+      const micSource = rawCtx.createMediaStreamSource(vocalMicStream);
+      const micGain = rawCtx.createGain();
+      micGain.gain.value = 0.8;
+      micSource.connect(micGain);
+
       vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
       vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
       vocalChorus.start();
-      const mixerGain = new Tone.Gain(1);
-      directGain = new Tone.Gain(0.9);
-      const intervals = [7, -7, -14];
-      harmonyShifts = intervals.map(semitones =>
-        new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
-      );
-      harmonyGains = intervals.map(() => new Tone.Gain(0));
 
-      const rawCtx = Tone.context.rawContext;
-      const micSource = rawCtx.createMediaStreamSource(vocalMicStream);
-      const bridgeGain = rawCtx.createGain();
-      bridgeGain.gain.value = 0.9;
-      micSource.connect(bridgeGain);
+      const reverbRawInput = reverb.input || reverb.node || (reverb as any)._reverb;
+      console.log('Reverb input type:', typeof reverbRawInput);
 
-      bridgeGain.connect(directGain);
-      directGain.connect(mixerGain);
-      harmonyShifts.forEach((shift, i) => {
-        bridgeGain.connect(shift);
-        shift.connect(harmonyGains[i]);
-        harmonyGains[i].connect(mixerGain);
-      });
+      micGain.connect(reverbRawInput);
+      reverb.connect(masterGain);
 
-      const merger = rawCtx.createChannelMerger(2);
-      mixerGain.connect(merger, 0, 0);
-      mixerGain.connect(merger, 0, 1);
-      const stereoNode = new Tone.Gain(1);
-      merger.connect(stereoNode);
-      stereoNode.connect(vocalTremolo);
-      vocalTremolo.connect(vocalChorus);
-      vocalChorus.connect(reverb);
-      console.log('✅ Audio: Vocal Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
+      console.log('✅ Audio: Vocal Mode | Mic → Reverb');
     } catch (err) {
       console.error('❌ Microphone error:', err.name, '-', err.message);
       console.error('Stack:', err.stack);
@@ -198,6 +181,10 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       audioInitialized = false;
       return;
     }
+
+    directGain = null;
+    harmonyShifts = [];
+    harmonyGains = [];
   } else {
     synth = new Tone.PolySynth(Tone.Synth, {
       oscillator: preset.oscillator,
