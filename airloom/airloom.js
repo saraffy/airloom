@@ -168,7 +168,8 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
     harmonyGains = intervals.map(() => new Tone.Gain(0));
     micInput = new Tone.UserMedia();
     try {
-      console.log('🎤 Requesting microphone access...');
+      console.log('🎤 Attempting micInput.open()...');
+      console.log('Current Tone context:', Tone.context.name, 'latencyHint:', Tone.context.latencyHint, 'lookAhead:', Tone.context.lookAhead);
       await micInput.open();
       console.log('✅ Microphone opened');
       micInput.connect(directGain);
@@ -189,8 +190,9 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       vocalChorus.connect(reverb);
       console.log('✅ Audio: Choir Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
     } catch (err) {
-      console.error('❌ Microphone error:', err.message);
-      alert('Microphone access denied or unavailable. Please check permissions.');
+      console.error('❌ Microphone error:', err.name, '-', err.message);
+      console.error('Stack:', err.stack);
+      alert('Microphone error (' + err.name + '): ' + err.message);
       audioInitialized = false;
       return;
     }
