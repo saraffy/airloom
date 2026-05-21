@@ -157,7 +157,7 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
 
   if (vocalModeEnabled) {
     vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
-    vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0.8 });
+    vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
     vocalChorus.start();
     const mixerGain = new Tone.Gain(1);
     directGain = new Tone.Gain(0.9);
