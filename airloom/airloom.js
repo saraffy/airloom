@@ -170,30 +170,9 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       const micGain = rawCtx.createGain();
       micGain.gain.value = 0.8;
       micSource.connect(micGain);
+      micGain.connect(rawCtx.destination);
 
-      vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
-      vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
-      vocalChorus.start();
-
-      directGain = new Tone.Gain(0.9);
-      const intervals = [7, -7, -14];
-      harmonyShifts = intervals.map(semitones =>
-        new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
-      );
-      harmonyGains = intervals.map(() => new Tone.Gain(0));
-
-      micGain.connect(directGain);
-      directGain.connect(vocalTremolo);
-
-      harmonyShifts.forEach((shift, i) => {
-        micGain.connect(shift);
-        shift.connect(harmonyGains[i]);
-        harmonyGains[i].connect(vocalTremolo);
-      });
-
-      vocalTremolo.connect(vocalChorus);
-      vocalChorus.connect(reverb);
-      console.log('✅ Audio: Vocal Mode | Mic → Reverb');
+      console.log('✅ Audio: Vocal Mode BASIC | Mic → Destination (Web Audio only)');
     } catch (err) {
       console.error('❌ Microphone error — name:', err.name, 'message:', err.message);
       console.error('Stack:', err.stack);
