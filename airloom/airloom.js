@@ -156,30 +156,32 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   const preset = INSTRUMENT_PRESETS[instrument];
 
   if (vocalModeEnabled) {
-    vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
-    vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
-    vocalChorus.start();
-    const mixerGain = new Tone.Gain(1);
-    directGain = new Tone.Gain(0.9);
-    const intervals = [7, -7, -14];
-    harmonyShifts = intervals.map(semitones =>
-      new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
-    );
-    harmonyGains = intervals.map(() => new Tone.Gain(0));
-    micInput = new Tone.UserMedia();
     try {
-      console.log('🎤 Attempting micInput.open()...');
-      console.log('Current Tone context:', Tone.context.name, 'latencyHint:', Tone.context.latencyHint, 'lookAhead:', Tone.context.lookAhead);
-      await micInput.open();
-      console.log('✅ Microphone opened');
-      micInput.connect(directGain);
+      vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
+      vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
+      vocalChorus.start();
+      const mixerGain = new Tone.Gain(1);
+      directGain = new Tone.Gain(0.9);
+      const intervals = [7, -7, -14];
+      harmonyShifts = intervals.map(semitones =>
+        new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
+      );
+      harmonyGains = intervals.map(() => new Tone.Gain(0));
+
+      const rawCtx = Tone.context.rawContext;
+      const micSource = rawCtx.createMediaStreamSource(vocalMicStream);
+      const bridgeGain = rawCtx.createGain();
+      bridgeGain.gain.value = 0.9;
+      micSource.connect(bridgeGain);
+
+      bridgeGain.connect(directGain);
       directGain.connect(mixerGain);
       harmonyShifts.forEach((shift, i) => {
-        micInput.connect(shift);
+        bridgeGain.connect(shift);
         shift.connect(harmonyGains[i]);
         harmonyGains[i].connect(mixerGain);
       });
-      const rawCtx = Tone.context.rawContext;
+
       const merger = rawCtx.createChannelMerger(2);
       mixerGain.connect(merger, 0, 0);
       mixerGain.connect(merger, 0, 1);
@@ -188,7 +190,7 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       stereoNode.connect(vocalTremolo);
       vocalTremolo.connect(vocalChorus);
       vocalChorus.connect(reverb);
-      console.log('✅ Audio: Choir Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
+      console.log('✅ Audio: Vocal Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
     } catch (err) {
       console.error('❌ Microphone error:', err.name, '-', err.message);
       console.error('Stack:', err.stack);
@@ -264,6 +266,7 @@ let vocalTremolo = null;
 let harmonyShifts = [];
 let harmonyGains = [];
 let directGain = null;
+let vocalMicStream = null;
 
 let debugOnce = true;
 
@@ -490,8 +493,7 @@ startBtn.addEventListener('click', async () => {
   if (vocalModeEnabled && !audioInitialized) {
     try {
       console.log('🎤 Requesting microphone permission...');
-      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      testStream.getTracks().forEach(t => t.stop());
+      vocalMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       console.log('✅ Microphone permission granted');
     } catch (err) {
       alert('Microphone access denied. Please allow microphone access and try again.\n\nError: ' + err.name);
