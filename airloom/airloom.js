@@ -157,13 +157,13 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
 
   if (vocalModeEnabled) {
     vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
-    vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 2.5, depth: 0.75, wet: 0.8 });
+    vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0.8 });
     vocalChorus.start();
     const mixerGain = new Tone.Gain(1);
     directGain = new Tone.Gain(0.9);
     const intervals = [7, -7, -14];
     harmonyShifts = intervals.map(semitones =>
-      new Tone.PitchShift({ pitch: semitones, windowSize: 0.1 })
+      new Tone.PitchShift({ pitch: semitones, windowSize: 0.04 })
     );
     harmonyGains = intervals.map(() => new Tone.Gain(0));
     micInput = new Tone.UserMedia();
@@ -247,6 +247,9 @@ let fistStateFrames = 0;
 const FIST_STATE_DEBOUNCE = 5;
 let chordSustainModeEnabled = false;
 let vocalModeEnabled = false;
+let vocalAxisX = 'reverb';
+let vocalAxisY = 'harmonyBlend';
+let vocalAxisFist = 'chorus';
 let micInput = null;
 let vocalChorus = null;
 let vocalTremolo = null;
@@ -388,25 +391,84 @@ function stopChord() {
   }
 }
 
+function applyVocalAxis(param, value) {
+  if (!audioInitialized) return;
+  switch (param) {
+    case 'reverb':
+      reverb.wet.value = value;
+      break;
+    case 'delayWet':
+      delay.wet.value = value;
+      break;
+    case 'chorusWet':
+      if (vocalChorus) vocalChorus.wet.value = value;
+      break;
+    case 'harmonyBlend':
+      if (harmonyGains.length === 3) {
+        harmonyGains[0].gain.value = Math.min(0.54, Math.max(0, value * 0.54));
+        harmonyGains[1].gain.value = Math.min(0.9, Math.max(0, value * 0.9));
+        harmonyGains[2].gain.value = Math.min(0.36, Math.max(0, (value - 0.3) * 0.514));
+      }
+      break;
+    case 'directBlend':
+      if (directGain) directGain.gain.value = value * 0.9;
+      break;
+  }
+}
+
+function applyVocalFist(param, isOpen) {
+  if (!audioInitialized) return;
+  switch (param) {
+    case 'chorus':
+      if (vocalChorus) vocalChorus.wet.value = isOpen ? 1 : 0;
+      break;
+    case 'tremolo':
+      if (vocalTremolo) vocalTremolo.wet.value = isOpen ? 0.8 : 0;
+      break;
+    case 'harmony':
+      if (harmonyGains.length === 3) {
+        harmonyGains.forEach(g => {
+          g.gain.value = isOpen ? (g._savedGain ?? 0.5) : 0;
+        });
+      }
+      break;
+    case 'reverb':
+      reverb.wet.value = isOpen ? 1 : 0;
+      break;
+  }
+}
+
 function mapGestureToVocal(gesture) {
   if (!audioInitialized || !vocalChorus) return;
 
-  reverb.wet.value = gesture.palmX;
-
+  const x = gesture.palmX;
   const y = 1 - gesture.palmY;
-  if (harmonyGains.length === 3) {
-    harmonyGains[0].gain.value = Math.min(0.54, Math.max(0, y * 0.54));
-    harmonyGains[1].gain.value = Math.min(0.9, Math.max(0, y * 0.9));
-    harmonyGains[2].gain.value = Math.min(0.36, Math.max(0, (y - 0.3) * 0.514));
-  }
 
-  vocalChorus.wet.value = gesture.isOpen ? 1 : 0;
-  vocalTremolo.wet.value = 0;
+  applyVocalAxis(vocalAxisX, x);
+  applyVocalAxis(vocalAxisY, y);
+  applyVocalFist(vocalAxisFist, gesture.isOpen);
 
   const numActive = harmonyGains.filter(g => g.gain.value > 0.1).length;
   HUD.chord.textContent = ['SOLO', '2-VOICE', 'FULL CHOIR'][numActive];
-  HUD.freq.textContent = Math.round(reverb.wet.value * 100) + '% reverb';
-  HUD.note.textContent = gesture.isOpen ? 'CHORUS ON' : 'CHORUS OFF';
+
+  let freqLabel = '';
+  switch (vocalAxisX) {
+    case 'reverb': freqLabel = Math.round(x * 100) + '% reverb'; break;
+    case 'delayWet': freqLabel = Math.round(x * 100) + '% delay'; break;
+    case 'chorusWet': freqLabel = Math.round(x * 100) + '% chorus'; break;
+    case 'directBlend': freqLabel = Math.round(x * 100) + '% direct'; break;
+    case 'harmonyBlend': freqLabel = Math.round(x * 100) + '% harmony'; break;
+  }
+  HUD.freq.textContent = freqLabel;
+
+  let noteLabel = '';
+  switch (vocalAxisFist) {
+    case 'chorus': noteLabel = gesture.isOpen ? 'CHORUS ON' : 'CHORUS OFF'; break;
+    case 'tremolo': noteLabel = gesture.isOpen ? 'TREMOLO ON' : 'TREMOLO OFF'; break;
+    case 'harmony': noteLabel = gesture.isOpen ? 'HARMONY ON' : 'HARMONY OFF'; break;
+    case 'reverb': noteLabel = gesture.isOpen ? 'REVERB ON' : 'REVERB OFF'; break;
+  }
+  HUD.note.textContent = noteLabel;
 }
 
 startBtn.addEventListener('click', () => {
@@ -416,6 +478,9 @@ startBtn.addEventListener('click', () => {
   const octaveMultiplier = Math.pow(2, octaveOffset);
   chordSustainModeEnabled = document.getElementById('chordSustainMode').checked;
   vocalModeEnabled = document.getElementById('vocalMode').checked;
+  vocalAxisX = document.getElementById('vocalAxisX').value;
+  vocalAxisY = document.getElementById('vocalAxisY').value;
+  vocalAxisFist = document.getElementById('vocalAxisFist').value;
   currentNotes = buildScaleNotes(SCALES[currentScale], octaveMultiplier);
   extendedScaleNotes = buildExtendedScaleNotes(SCALES[currentScale], octaveMultiplier);
   console.log('Scale selected:', currentScale, 'Octave:', octaveOffset, 'Sustain mode:', chordSustainModeEnabled, 'Vocal mode:', vocalModeEnabled, '- Notes:', currentNotes.length);
@@ -740,8 +805,8 @@ function detectColorHand() {
       if (density >= 0.08) {
         const pinchDistRaw = bboxW / bboxH;
         const pinchDist = Math.max(0, Math.min(1, pinchDistRaw / 3));
-        const bboxArea = bboxW * bboxH;
-        const isOpen = bboxArea > 150000;
+        const bboxFraction = (bboxW * bboxH) / (canvas.width * canvas.height);
+        const isOpen = bboxFraction > 0.08;
 
         const dx = centerX - prevCentroidX;
         const dy = centerY - prevCentroidY;
