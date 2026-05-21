@@ -162,39 +162,31 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   if (vocalModeEnabled) {
     try {
       console.log('🎤 Requesting microphone access...');
-      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      testStream.getTracks().forEach(t => t.stop());
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       console.log('✅ Microphone permission granted');
-    } catch (err) {
-      console.error('❌ Permission error:', err.name);
-      alert('Microphone access denied. Please allow microphone access and try again.\n\nError: ' + err.name);
-      audioInitialized = false;
-      return;
-    }
 
-    vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
-    vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
-    vocalChorus.start();
-    const mixerGain = new Tone.Gain(1);
-    directGain = new Tone.Gain(0.9);
-    const intervals = [7, -7, -14];
-    harmonyShifts = intervals.map(semitones =>
-      new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
-    );
-    harmonyGains = intervals.map(() => new Tone.Gain(0));
-    micInput = new Tone.UserMedia();
-    try {
-      await micInput.open();
-      console.log('✅ Microphone opened');
-      micInput.connect(directGain);
+      vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
+      vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
+      vocalChorus.start();
+      const mixerGain = new Tone.Gain(1);
+      directGain = new Tone.Gain(0.9);
+      const intervals = [7, -7, -14];
+      harmonyShifts = intervals.map(semitones =>
+        new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
+      );
+      harmonyGains = intervals.map(() => new Tone.Gain(0));
+
+      const rawCtx = Tone.context.rawContext;
+      const micSource = rawCtx.createMediaStreamAudioSourceNode(stream);
+      const merger = rawCtx.createChannelMerger(2);
+
+      micSource.connect(directGain);
       directGain.connect(mixerGain);
       harmonyShifts.forEach((shift, i) => {
-        micInput.connect(shift);
+        micSource.connect(shift);
         shift.connect(harmonyGains[i]);
         harmonyGains[i].connect(mixerGain);
       });
-      const rawCtx = Tone.context.rawContext;
-      const merger = rawCtx.createChannelMerger(2);
       mixerGain.connect(merger, 0, 0);
       mixerGain.connect(merger, 0, 1);
       const stereoNode = new Tone.Gain(1);
