@@ -128,8 +128,7 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   audioInitialized = true;
 
   if (vocalModeEnabled) {
-    const lowLatencyCtx = new Tone.Context({ latencyHint: 'interactive', lookAhead: 0.005 });
-    Tone.setContext(lowLatencyCtx);
+    Tone.context.lookAhead = 0.005;
   }
 
   await Tone.start();
