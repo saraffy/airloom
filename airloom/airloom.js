@@ -177,7 +177,7 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       harmonyGains = intervals.map(() => new Tone.Gain(0));
 
       const rawCtx = Tone.context.rawContext;
-      const micSource = rawCtx.createMediaStreamAudioSourceNode(stream);
+      const micSource = rawCtx.createMediaStreamSource(stream);
       const merger = rawCtx.createChannelMerger(2);
 
       micSource.connect(directGain);
