@@ -128,11 +128,9 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   audioInitialized = true;
 
   await Tone.start();
-  Tone.context.lookAhead = 0.01;
-  Tone.context.updateInterval = 0.01;
 
   masterGain = new Tone.Gain(0.5).toDestination();
-  reverb = new Tone.Reverb({ decay: reverbDecay, wet: reverbWet });
+  reverb = new Tone.Reverb({ decay: reverbDecay, wet: reverbWet, preDelay: 0 });
   delay = new Tone.FeedbackDelay({ delayTime, feedback: delayFeedback, wet: delayWet });
 
   await reverb.ready;
@@ -165,7 +163,7 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
     directGain = new Tone.Gain(0.9);
     const intervals = [7, -7, -14];
     harmonyShifts = intervals.map(semitones =>
-      new Tone.PitchShift({ pitch: semitones, windowSize: 0.04 })
+      new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
     );
     harmonyGains = intervals.map(() => new Tone.Gain(0));
     micInput = new Tone.UserMedia();
@@ -180,7 +178,9 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
         shift.connect(harmonyGains[i]);
         harmonyGains[i].connect(mixerGain);
       });
-      mixerGain.connect(vocalTremolo);
+      const monoToStereo = new Tone.Panner(0);
+      mixerGain.connect(monoToStereo);
+      monoToStereo.connect(vocalTremolo);
       vocalTremolo.connect(vocalChorus);
       vocalChorus.connect(reverb);
       console.log('✅ Audio: Choir Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
@@ -394,7 +394,7 @@ function stopChord() {
 }
 
 function applyVocalAxis(param, value) {
-  if (!audioInitialized) return;
+  if (!audioInitialized || param === 'none') return;
   switch (param) {
     case 'reverb':
       reverb.wet.value = value;
@@ -419,7 +419,7 @@ function applyVocalAxis(param, value) {
 }
 
 function applyVocalFist(param, isOpen) {
-  if (!audioInitialized) return;
+  if (!audioInitialized || param === 'none') return;
   switch (param) {
     case 'chorus':
       if (vocalChorus) vocalChorus.wet.value = isOpen ? 1 : 0;
@@ -480,6 +480,11 @@ startBtn.addEventListener('click', () => {
   const octaveMultiplier = Math.pow(2, octaveOffset);
   chordSustainModeEnabled = document.getElementById('chordSustainMode').checked;
   vocalModeEnabled = document.getElementById('vocalMode').checked;
+
+  if (!audioInitialized && vocalModeEnabled) {
+    const lowLatencyCtx = new Tone.Context({ latencyHint: 'interactive', lookAhead: 0.005 });
+    Tone.setContext(lowLatencyCtx);
+  }
   currentNotes = buildScaleNotes(SCALES[currentScale], octaveMultiplier);
   extendedScaleNotes = buildExtendedScaleNotes(SCALES[currentScale], octaveMultiplier);
   console.log('Scale selected:', currentScale, 'Octave:', octaveOffset, 'Sustain mode:', chordSustainModeEnabled, 'Vocal mode:', vocalModeEnabled, '- Notes:', currentNotes.length);
@@ -736,8 +741,8 @@ function drawVocalInstructions() {
   ctx.font = '18px Courier New, monospace';
   ctx.fillStyle = 'rgba(0, 255, 0, 0.9)';
 
-  const AXIS_LABEL = { reverb:'REVERB', delayWet:'DELAY', chorusWet:'CHORUS WET', harmonyBlend:'HARMONY', directBlend:'DIRECT' };
-  const FIST_LABEL = { chorus:'CHORUS', tremolo:'TREMOLO', harmony:'HARMONY', reverb:'REVERB' };
+  const AXIS_LABEL = { none:'OFF', reverb:'REVERB', delayWet:'DELAY', chorusWet:'CHORUS WET', harmonyBlend:'HARMONY', directBlend:'DIRECT' };
+  const FIST_LABEL = { none:'OFF', chorus:'CHORUS', tremolo:'TREMOLO', harmony:'HARMONY', reverb:'REVERB' };
 
   const instructions = [
     `← LEFT / → RIGHT = ${AXIS_LABEL[vocalAxisX] ?? vocalAxisX.toUpperCase()}`,
@@ -811,7 +816,7 @@ function detectColorHand() {
   ctx.fillText('Red pixels: ' + count, -20, 40);
   ctx.restore();
 
-  if (count >= 800) {
+  if (count >= 80) {
     const centerX = sumX / count;
     const centerY = sumY / count;
     const bboxW = maxX - minX;
@@ -819,7 +824,7 @@ function detectColorHand() {
 
     if (bboxW >= 60 && bboxH >= 60) {
       const density = count / (bboxW * bboxH);
-      if (density >= 0.08) {
+      if (density >= 0.04) {
         const pinchDistRaw = bboxW / bboxH;
         const pinchDist = Math.max(0, Math.min(1, pinchDistRaw / 3));
         const bboxFraction = (bboxW * bboxH) / (canvas.width * canvas.height);
@@ -913,9 +918,9 @@ function drawFistIndicator(centerX, centerY, bboxH, isOpen) {
   ctx.scale(-1, 1);
 
   const labelY = centerY + bboxH * 0.6;
-  const FIST_LABEL = { chorus:'CHORUS', tremolo:'TREMOLO', harmony:'HARMONY', reverb:'REVERB' };
+  const FIST_LABEL = { none:'OFF', chorus:'CHORUS', tremolo:'TREMOLO', harmony:'HARMONY', reverb:'REVERB' };
   const label = FIST_LABEL[vocalAxisFist] ?? vocalAxisFist.toUpperCase();
-  const text = isOpen ? label + ' ON' : label + ' OFF';
+  const text = vocalAxisFist === 'none' ? 'OFF' : (isOpen ? label + ' ON' : label + ' OFF');
   const color = isOpen ? '#00ff00' : '#ff8800';
 
   ctx.fillStyle = color;
