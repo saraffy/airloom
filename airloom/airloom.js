@@ -130,7 +130,7 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   await Tone.start();
 
   masterGain = new Tone.Gain(0.5).toDestination();
-  reverb = new Tone.Reverb({ decay: reverbDecay, wet: reverbWet, preDelay: 0 });
+  reverb = new Tone.Reverb({ decay: reverbDecay, wet: vocalModeEnabled ? 0 : reverbWet, preDelay: 0 });
   delay = new Tone.FeedbackDelay({ delayTime, feedback: delayFeedback, wet: delayWet });
 
   await reverb.ready;
@@ -178,9 +178,13 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
         shift.connect(harmonyGains[i]);
         harmonyGains[i].connect(mixerGain);
       });
-      const monoToStereo = new Tone.Panner(0);
-      mixerGain.connect(monoToStereo);
-      monoToStereo.connect(vocalTremolo);
+      const rawCtx = Tone.context.rawContext;
+      const merger = rawCtx.createChannelMerger(2);
+      mixerGain.connect(merger, 0, 0);
+      mixerGain.connect(merger, 0, 1);
+      const stereoNode = new Tone.Gain(1);
+      merger.connect(stereoNode);
+      stereoNode.connect(vocalTremolo);
       vocalTremolo.connect(vocalChorus);
       vocalChorus.connect(reverb);
       console.log('✅ Audio: Choir Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
