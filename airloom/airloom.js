@@ -160,6 +160,18 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   const preset = INSTRUMENT_PRESETS[instrument];
 
   if (vocalModeEnabled) {
+    try {
+      console.log('🎤 Requesting microphone access...');
+      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      testStream.getTracks().forEach(t => t.stop());
+      console.log('✅ Microphone permission granted');
+    } catch (err) {
+      console.error('❌ Permission error:', err.name);
+      alert('Microphone access denied. Please allow microphone access and try again.\n\nError: ' + err.name);
+      audioInitialized = false;
+      return;
+    }
+
     vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
     vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
     vocalChorus.start();
@@ -172,7 +184,6 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
     harmonyGains = intervals.map(() => new Tone.Gain(0));
     micInput = new Tone.UserMedia();
     try {
-      console.log('🎤 Requesting microphone access...');
       await micInput.open();
       console.log('✅ Microphone opened');
       micInput.connect(directGain);
@@ -488,19 +499,6 @@ startBtn.addEventListener('click', async () => {
   const octaveMultiplier = Math.pow(2, octaveOffset);
   chordSustainModeEnabled = document.getElementById('chordSustainMode').checked;
   vocalModeEnabled = document.getElementById('vocalMode').checked;
-
-  if (vocalModeEnabled && !audioInitialized) {
-    try {
-      console.log('🎤 Requesting microphone permission...');
-      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      testStream.getTracks().forEach(t => t.stop());
-      console.log('✅ Microphone permission granted');
-    } catch (err) {
-      console.error('❌ Permission error:', err.name);
-      alert('Microphone access denied. Please allow microphone access and try again.\n\nError: ' + err.name);
-      return;
-    }
-  }
   currentNotes = buildScaleNotes(SCALES[currentScale], octaveMultiplier);
   extendedScaleNotes = buildExtendedScaleNotes(SCALES[currentScale], octaveMultiplier);
   console.log('Scale selected:', currentScale, 'Octave:', octaveOffset, 'Sustain mode:', chordSustainModeEnabled, 'Vocal mode:', vocalModeEnabled, '- Notes:', currentNotes.length);
