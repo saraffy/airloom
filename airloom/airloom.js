@@ -167,10 +167,12 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
       vocalChorus.start();
 
-      const reverbRawInput = reverb.input || reverb.node || (reverb as any)._reverb;
-      console.log('Reverb input type:', typeof reverbRawInput);
+      console.log('Reverb object keys:', Object.keys(reverb).slice(0, 10));
+      console.log('reverb.input:', reverb.input);
+      console.log('reverb.node:', reverb.node);
+      console.log('reverb._reverb:', reverb._reverb);
 
-      micGain.connect(reverbRawInput);
+      micGain.connect(reverb.input);
       reverb.connect(masterGain);
 
       console.log('✅ Audio: Vocal Mode | Mic → Reverb');
