@@ -165,12 +165,15 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       console.log('✅ Microphone permission granted');
 
+      const rawCtx = Tone.context.rawContext;
+      const micSource = rawCtx.createMediaStreamSource(stream);
+      const micGain = rawCtx.createGain();
+      micGain.gain.value = 0.8;
+      micSource.connect(micGain);
+
       vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
       vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
       vocalChorus.start();
-
-      const rawCtx = Tone.context.rawContext;
-      const micSource = rawCtx.createMediaStreamSource(stream);
 
       directGain = new Tone.Gain(0.9);
       const intervals = [7, -7, -14];
@@ -179,15 +182,11 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       );
       harmonyGains = intervals.map(() => new Tone.Gain(0));
 
-      const toToneNode = new Tone.Gain(1);
-      micSource.connect(toToneNode);
-
-      directGain.gain.value = 0.9;
-      toToneNode.connect(directGain);
+      micGain.connect(directGain);
       directGain.connect(vocalTremolo);
 
       harmonyShifts.forEach((shift, i) => {
-        toToneNode.connect(shift);
+        micGain.connect(shift);
         shift.connect(harmonyGains[i]);
         harmonyGains[i].connect(vocalTremolo);
       });
