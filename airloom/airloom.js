@@ -498,8 +498,7 @@ startBtn.addEventListener('click', async () => {
       return;
     }
 
-    const lowLatencyCtx = new Tone.Context({ latencyHint: 'interactive', lookAhead: 0.005 });
-    Tone.setContext(lowLatencyCtx);
+    Tone.context.lookAhead = 0.005;
   }
 
   currentNotes = buildScaleNotes(SCALES[currentScale], octaveMultiplier);
