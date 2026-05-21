@@ -127,10 +127,6 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   if (audioInitialized) return;
   audioInitialized = true;
 
-  if (vocalModeEnabled) {
-    Tone.context.lookAhead = 0.005;
-  }
-
   await Tone.start();
 
   masterGain = new Tone.Gain(0.5).toDestination();
@@ -160,45 +156,41 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   const preset = INSTRUMENT_PRESETS[instrument];
 
   if (vocalModeEnabled) {
+    vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
+    vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
+    vocalChorus.start();
+    const mixerGain = new Tone.Gain(1);
+    directGain = new Tone.Gain(0.9);
+    const intervals = [7, -7, -14];
+    harmonyShifts = intervals.map(semitones =>
+      new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
+    );
+    harmonyGains = intervals.map(() => new Tone.Gain(0));
+    micInput = new Tone.UserMedia();
     try {
       console.log('🎤 Requesting microphone access...');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      console.log('✅ Microphone permission granted');
-
-      const rawCtx = Tone.context.rawContext;
-      const micSource = rawCtx.createMediaStreamSource(stream);
-      const micGain = rawCtx.createGain();
-      micGain.gain.value = 0.8;
-      micSource.connect(micGain);
-
-      vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
-      vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
-      vocalChorus.start();
-
-      directGain = new Tone.Gain(0.9);
-      const intervals = [7, -7, -14];
-      harmonyShifts = intervals.map(semitones =>
-        new Tone.PitchShift({ pitch: semitones, windowSize: 0.025 })
-      );
-      harmonyGains = intervals.map(() => new Tone.Gain(0));
-
-      micGain.connect(directGain.input);
-      directGain.connect(vocalTremolo);
-
+      await micInput.open();
+      console.log('✅ Microphone opened');
+      micInput.connect(directGain);
+      directGain.connect(mixerGain);
       harmonyShifts.forEach((shift, i) => {
-        micGain.connect(shift.input);
+        micInput.connect(shift);
         shift.connect(harmonyGains[i]);
-        harmonyGains[i].connect(vocalTremolo);
+        harmonyGains[i].connect(mixerGain);
       });
-
+      const rawCtx = Tone.context.rawContext;
+      const merger = rawCtx.createChannelMerger(2);
+      mixerGain.connect(merger, 0, 0);
+      mixerGain.connect(merger, 0, 1);
+      const stereoNode = new Tone.Gain(1);
+      merger.connect(stereoNode);
+      stereoNode.connect(vocalTremolo);
       vocalTremolo.connect(vocalChorus);
       vocalChorus.connect(reverb);
-
-      console.log('✅ Audio: Vocal Mode | Mic → [Direct + 3 Harmonies] → Tremolo → Chorus → Reverb');
+      console.log('✅ Audio: Choir Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
     } catch (err) {
-      console.error('❌ Microphone error — name:', err.name, 'message:', err.message);
-      console.error('Stack:', err.stack);
-      alert('Microphone error (' + err.name + '): ' + err.message + '\nPlease check browser permissions.');
+      console.error('❌ Microphone error:', err.message);
+      alert('Microphone access denied or unavailable. Please check permissions.');
       audioInitialized = false;
       return;
     }
@@ -492,6 +484,22 @@ startBtn.addEventListener('click', async () => {
   const octaveMultiplier = Math.pow(2, octaveOffset);
   chordSustainModeEnabled = document.getElementById('chordSustainMode').checked;
   vocalModeEnabled = document.getElementById('vocalMode').checked;
+
+  if (vocalModeEnabled && !audioInitialized) {
+    try {
+      console.log('🎤 Requesting microphone permission...');
+      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      testStream.getTracks().forEach(t => t.stop());
+      console.log('✅ Microphone permission granted');
+    } catch (err) {
+      alert('Microphone access denied. Please allow microphone access and try again.\n\nError: ' + err.name);
+      return;
+    }
+
+    const lowLatencyCtx = new Tone.Context({ latencyHint: 'interactive', lookAhead: 0.005 });
+    Tone.setContext(lowLatencyCtx);
+  }
+
   currentNotes = buildScaleNotes(SCALES[currentScale], octaveMultiplier);
   extendedScaleNotes = buildExtendedScaleNotes(SCALES[currentScale], octaveMultiplier);
   console.log('Scale selected:', currentScale, 'Octave:', octaveOffset, 'Sustain mode:', chordSustainModeEnabled, 'Vocal mode:', vocalModeEnabled, '- Notes:', currentNotes.length);
