@@ -128,6 +128,8 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   audioInitialized = true;
 
   await Tone.start();
+  Tone.context.lookAhead = 0.01;
+  Tone.context.updateInterval = 0.01;
 
   masterGain = new Tone.Gain(0.5).toDestination();
   reverb = new Tone.Reverb({ decay: reverbDecay, wet: reverbWet });
@@ -478,9 +480,6 @@ startBtn.addEventListener('click', () => {
   const octaveMultiplier = Math.pow(2, octaveOffset);
   chordSustainModeEnabled = document.getElementById('chordSustainMode').checked;
   vocalModeEnabled = document.getElementById('vocalMode').checked;
-  vocalAxisX = document.getElementById('vocalAxisX').value;
-  vocalAxisY = document.getElementById('vocalAxisY').value;
-  vocalAxisFist = document.getElementById('vocalAxisFist').value;
   currentNotes = buildScaleNotes(SCALES[currentScale], octaveMultiplier);
   extendedScaleNotes = buildExtendedScaleNotes(SCALES[currentScale], octaveMultiplier);
   console.log('Scale selected:', currentScale, 'Octave:', octaveOffset, 'Sustain mode:', chordSustainModeEnabled, 'Vocal mode:', vocalModeEnabled, '- Notes:', currentNotes.length);
@@ -503,7 +502,21 @@ startBtn.addEventListener('click', () => {
 
   initAudio(reverbDecay, reverbWet, delayTime, delayFeedback, delayWet, instrument);
   splash.classList.add('hidden');
+  if (vocalModeEnabled) {
+    document.getElementById('vocalPanel').style.display = 'block';
+  }
   document.getElementById('recBtn').style.display = 'block';
+});
+
+['vocalAxisX', 'vocalAxisY', 'vocalAxisFist'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener('change', function() {
+      if (id === 'vocalAxisX') vocalAxisX = this.value;
+      else if (id === 'vocalAxisY') vocalAxisY = this.value;
+      else vocalAxisFist = this.value;
+    });
+  }
 });
 
 function startRecording() {
@@ -722,10 +735,14 @@ function drawVocalInstructions() {
 
   ctx.font = '18px Courier New, monospace';
   ctx.fillStyle = 'rgba(0, 255, 0, 0.9)';
+
+  const AXIS_LABEL = { reverb:'REVERB', delayWet:'DELAY', chorusWet:'CHORUS WET', harmonyBlend:'HARMONY', directBlend:'DIRECT' };
+  const FIST_LABEL = { chorus:'CHORUS', tremolo:'TREMOLO', harmony:'HARMONY', reverb:'REVERB' };
+
   const instructions = [
-    '← LEFT = DRY  |  → RIGHT = REVERB',
-    '↑ UP = FULL CHOIR  |  ↓ DOWN = SOLO',
-    '✦ OPEN HAND = CHORUS  |  FIST = OFF',
+    `← LEFT / → RIGHT = ${AXIS_LABEL[vocalAxisX] ?? vocalAxisX.toUpperCase()}`,
+    `↑ UP / ↓ DOWN = ${AXIS_LABEL[vocalAxisY] ?? vocalAxisY.toUpperCase()}`,
+    `✦ OPEN = ${FIST_LABEL[vocalAxisFist] ?? vocalAxisFist.toUpperCase()} ON  |  FIST = OFF`,
   ];
   const lineHeight = 40;
   instructions.forEach((text, i) => {
@@ -896,7 +913,9 @@ function drawFistIndicator(centerX, centerY, bboxH, isOpen) {
   ctx.scale(-1, 1);
 
   const labelY = centerY + bboxH * 0.6;
-  const text = isOpen ? 'CHORUS ON' : 'CHORUS OFF';
+  const FIST_LABEL = { chorus:'CHORUS', tremolo:'TREMOLO', harmony:'HARMONY', reverb:'REVERB' };
+  const label = FIST_LABEL[vocalAxisFist] ?? vocalAxisFist.toUpperCase();
+  const text = isOpen ? label + ' ON' : label + ' OFF';
   const color = isOpen ? '#00ff00' : '#ff8800';
 
   ctx.fillStyle = color;
