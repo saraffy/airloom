@@ -134,8 +134,8 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   await Tone.start();
 
   masterGain = new Tone.Gain(0.5).toDestination();
-  reverb = new Tone.Reverb({ decay: reverbDecay, wet: vocalModeEnabled ? 0 : reverbWet, preDelay: 0 });
   delay = new Tone.FeedbackDelay({ delayTime, feedback: delayFeedback, wet: delayWet });
+  reverb = new Tone.Reverb({ decay: reverbDecay, wet: vocalModeEnabled ? 0 : reverbWet, preDelay: 0 });
 
   await reverb.ready;
 
@@ -168,7 +168,10 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       vocalTremolo = new Tone.Tremolo({ frequency: 2, depth: 0.8, wet: 0 }).start();
       vocalChorus = new Tone.Chorus({ frequency: 1.5, delayTime: 1.0, depth: 0.75, wet: 0 });
       vocalChorus.start();
-      const mixerGain = new Tone.Gain(1);
+
+      const rawCtx = Tone.context.rawContext;
+      const micSource = rawCtx.createMediaStreamSource(stream);
+
       directGain = new Tone.Gain(0.9);
       const intervals = [7, -7, -14];
       harmonyShifts = intervals.map(semitones =>
@@ -176,27 +179,25 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       );
       harmonyGains = intervals.map(() => new Tone.Gain(0));
 
-      const rawCtx = Tone.context.rawContext;
-      const micSource = rawCtx.createMediaStreamSource(stream);
-      const merger = rawCtx.createChannelMerger(2);
+      const toToneNode = new Tone.Gain(1);
+      micSource.connect(toToneNode);
 
-      micSource.connect(directGain);
-      directGain.connect(mixerGain);
+      directGain.gain.value = 0.9;
+      toToneNode.connect(directGain);
+      directGain.connect(vocalTremolo);
+
       harmonyShifts.forEach((shift, i) => {
-        micSource.connect(shift);
+        toToneNode.connect(shift);
         shift.connect(harmonyGains[i]);
-        harmonyGains[i].connect(mixerGain);
+        harmonyGains[i].connect(vocalTremolo);
       });
-      mixerGain.connect(merger, 0, 0);
-      mixerGain.connect(merger, 0, 1);
-      const stereoNode = new Tone.Gain(1);
-      merger.connect(stereoNode);
-      stereoNode.connect(vocalTremolo);
+
       vocalTremolo.connect(vocalChorus);
       vocalChorus.connect(reverb);
-      console.log('✅ Audio: Choir Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
+      console.log('✅ Audio: Vocal Mode | Mic → Reverb');
     } catch (err) {
       console.error('❌ Microphone error — name:', err.name, 'message:', err.message);
+      console.error('Stack:', err.stack);
       alert('Microphone error (' + err.name + '): ' + err.message + '\nPlease check browser permissions.');
       audioInitialized = false;
       return;
