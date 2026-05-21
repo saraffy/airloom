@@ -127,6 +127,11 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
   if (audioInitialized) return;
   audioInitialized = true;
 
+  if (vocalModeEnabled) {
+    const lowLatencyCtx = new Tone.Context({ latencyHint: 'interactive', lookAhead: 0.005 });
+    Tone.setContext(lowLatencyCtx);
+  }
+
   await Tone.start();
 
   masterGain = new Tone.Gain(0.5).toDestination();
@@ -189,8 +194,8 @@ async function initAudio(reverbDecay = 2.5, reverbWet = 0.4, delayTime = 0.25, d
       vocalChorus.connect(reverb);
       console.log('✅ Audio: Choir Mode | Mic → [Direct + 3 Harmonies] → Mixer → Chorus → Reverb');
     } catch (err) {
-      console.error('❌ Microphone error:', err.message);
-      alert('Microphone access denied or unavailable. Please check permissions.');
+      console.error('❌ Microphone error — name:', err.name, 'message:', err.message);
+      alert('Microphone error (' + err.name + '): ' + err.message + '\nPlease check browser permissions.');
       audioInitialized = false;
       return;
     }
@@ -477,7 +482,7 @@ function mapGestureToVocal(gesture) {
   HUD.note.textContent = noteLabel;
 }
 
-startBtn.addEventListener('click', () => {
+startBtn.addEventListener('click', async () => {
   const scaleSelect = document.getElementById('scaleSelect');
   currentScale = scaleSelect.value;
   const octaveOffset = parseInt(document.getElementById('octaveSelect').value);
@@ -485,9 +490,17 @@ startBtn.addEventListener('click', () => {
   chordSustainModeEnabled = document.getElementById('chordSustainMode').checked;
   vocalModeEnabled = document.getElementById('vocalMode').checked;
 
-  if (!audioInitialized && vocalModeEnabled) {
-    const lowLatencyCtx = new Tone.Context({ latencyHint: 'interactive', lookAhead: 0.005 });
-    Tone.setContext(lowLatencyCtx);
+  if (vocalModeEnabled && !audioInitialized) {
+    try {
+      console.log('🎤 Requesting microphone permission...');
+      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      testStream.getTracks().forEach(t => t.stop());
+      console.log('✅ Microphone permission granted');
+    } catch (err) {
+      console.error('❌ Permission error:', err.name);
+      alert('Microphone access denied. Please allow microphone access and try again.\n\nError: ' + err.name);
+      return;
+    }
   }
   currentNotes = buildScaleNotes(SCALES[currentScale], octaveMultiplier);
   extendedScaleNotes = buildExtendedScaleNotes(SCALES[currentScale], octaveMultiplier);
@@ -509,7 +522,7 @@ startBtn.addEventListener('click', () => {
   const delayWet = parseFloat(document.getElementById('delayWet').value);
   const instrument = document.getElementById('instrumentSelect').value;
 
-  initAudio(reverbDecay, reverbWet, delayTime, delayFeedback, delayWet, instrument);
+  await initAudio(reverbDecay, reverbWet, delayTime, delayFeedback, delayWet, instrument);
   splash.classList.add('hidden');
   if (vocalModeEnabled) {
     document.getElementById('vocalPanel').style.display = 'block';
