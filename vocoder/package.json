@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "copy-wasm": "node scripts/copy-wasm.mjs",
+    "predev": "npm run copy-wasm",
+    "prebuild": "npm run copy-wasm",
+    "postinstall": "node scripts/copy-wasm.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview"

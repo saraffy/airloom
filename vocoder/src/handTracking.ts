@@ -22,9 +22,15 @@ import {
   type NormalizedLandmark,
 } from '@mediapipe/tasks-vision';
 
-// CDN paths. Pinning a version keeps WASM/model in sync with the npm package.
-const TASKS_VERSION = '0.10.22';
-const WASM_BASE = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${TASKS_VERSION}/wasm`;
+// WASM runtime is served locally from /wasm (see vite.config.ts -- the files
+// are copied at dev/build time from node_modules/@mediapipe/tasks-vision/wasm).
+// Serving locally avoids the missing-wasm-folder issue on some jsDelivr
+// versions and the MIME/nosniff errors that come with it.
+//
+// If you ever want to switch back to CDN, the known-working pin is 0.10.14:
+//   const WASM_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+// (Avoid 0.10.22 on jsDelivr -- the wasm/ subfolder is not published there.)
+const WASM_BASE = '/wasm';
 const MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 

@@ -93,10 +93,36 @@ async function start(): Promise<void> {
     setStatus('Tracking. Wave at the camera.', 'ok');
     requestAnimationFrame(renderLoop);
   } catch (err) {
-    console.error(err);
-    setStatus(`Failed to start: ${(err as Error).message}`, 'err');
+    // MediaPipe + getUserMedia can throw DOMException, plain objects, or
+    // strings -- not always proper Error instances. Coerce to a readable
+    // message so the UI never shows "undefined".
+    console.error('Failed to start:', err);
+    const message = describeError(err);
+    setStatus(`Failed to start: ${message}`, 'err');
     startBtn.disabled = false;
   }
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    // DOMException uses .name for things like "NotAllowedError" -- include it
+    // for clarity when .message is empty or generic.
+    return err.name && err.name !== 'Error'
+      ? `${err.name}: ${err.message || '(no message)'}`
+      : err.message || err.name || '(no message — see console)';
+  }
+  if (typeof err === 'string' && err.length > 0) return err;
+  if (err && typeof err === 'object') {
+    const maybe = err as { message?: unknown; name?: unknown };
+    if (typeof maybe.message === 'string' && maybe.message) return maybe.message;
+    if (typeof maybe.name === 'string' && maybe.name) return maybe.name;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      // fall through
+    }
+  }
+  return '(no message — see console)';
 }
 
 // ---------------------------------------------------------------------------
