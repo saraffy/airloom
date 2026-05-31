@@ -29,30 +29,56 @@
 import envelopeFollowerUrl from './envelope-follower-worklet.js?url';
 
 export interface VocoderOptions {
-  /** Number of bands. 16 is the spec default. */
+  /**
+   * Number of bands. More bands = finer formant resolution (better vowel
+   * discrimination) at proportionally more CPU. 16 is the spec minimum;
+   * 24 is the sweet spot for intelligible speech.
+   */
   bands?: number;
   /** Lowest band center frequency (Hz). */
   lowHz?: number;
   /** Highest band center frequency (Hz). */
   highHz?: number;
-  /** Bandpass Q for both modulator and carrier filters. Higher = narrower. */
+  /**
+   * Bandpass Q for both modulator and carrier filters. Higher = narrower
+   * bands (more characteristic vocoder rasp, but blurs vowels). Lower =
+   * wider bands (softer / less robotic, but vowels also blur).
+   */
   q?: number;
-  /** Envelope follower attack time (sec). */
+  /**
+   * Envelope follower attack time (sec). Short = transients (consonants)
+   * punch through cleanly.
+   */
   attackSec?: number;
-  /** Envelope follower release time (sec). */
+  /**
+   * Envelope follower release time (sec). Short = spectral envelope tracks
+   * fast-moving vowels without smearing. Too short = "pumping" / amplitude
+   * modulation artefacts. ~10-20ms works well for speech.
+   */
   releaseSec?: number;
-  /** Master output gain compensation. Sum of 16 BPFs is quieter than dry. */
+  /**
+   * Dry mic level mixed into output (0..1). A small amount of unprocessed
+   * voice adds naturalness and improves intelligibility without breaking
+   * the vocoder effect. Try 0.0 for pure robot, 0.1-0.2 for "natural robot",
+   * 0.3+ for "doubled voice".
+   */
+  dryMix?: number;
+  /**
+   * Master output gain. Bands' summed level depends on bands/Q -- adjust if
+   * the vocoded signal is too quiet or clips.
+   */
   outputGain?: number;
 }
 
 const DEFAULTS: Required<VocoderOptions> = {
-  bands: 16,
+  bands: 24,
   lowHz: 80,
   highHz: 8000,
-  q: 6,
+  q: 5,
   attackSec: 0.005,
-  releaseSec: 0.025,
-  outputGain: 3.0,
+  releaseSec: 0.015,
+  dryMix: 0.12,
+  outputGain: 2.0,
 };
 
 /**
@@ -83,6 +109,7 @@ export class Vocoder {
   private readonly opts: Required<VocoderOptions>;
   private readonly envNodes: AudioWorkletNode[] = [];
   private readonly vcaNodes: GainNode[] = [];
+  private readonly dryGain: GainNode;
 
   private constructor(ctx: AudioContext, opts: Required<VocoderOptions>) {
     this.ctx = ctx;
@@ -96,6 +123,14 @@ export class Vocoder {
     this.carrierIn.gain.value = 1;
     this.output = ctx.createGain();
     this.output.gain.value = opts.outputGain;
+
+    // Dry mic blend: a small parallel path that sends the raw modulator
+    // directly into the output. ~10-15% of unprocessed voice softens the
+    // robotic character and aids intelligibility.
+    this.dryGain = ctx.createGain();
+    this.dryGain.gain.value = opts.dryMix;
+    this.modulatorIn.connect(this.dryGain);
+    this.dryGain.connect(this.output);
 
     this.bandFreqs = logSpacedBands(opts.lowHz, opts.highHz, opts.bands);
   }
@@ -179,5 +214,10 @@ export class Vocoder {
     for (const env of this.envNodes) {
       env.parameters.get('release')!.setTargetAtTime(sec, this.ctx.currentTime, 0.01);
     }
+  }
+
+  /** Set the dry-mic blend level (0..1). Smooth-ramps to avoid clicks. */
+  setDryMix(level: number): void {
+    this.dryGain.gain.setTargetAtTime(level, this.ctx.currentTime, 0.02);
   }
 }

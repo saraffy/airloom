@@ -92,7 +92,12 @@ class EnvelopeFollowerProcessor extends AudioWorkletProcessor {
       s += coef * (x - s);
       outCh[i] = s * gain;
     }
-    this.state = s;
+    // Denormal flush: when the modulator goes truly silent, s decays
+    // exponentially toward zero. Below ~1e-38 (single-precision denormal
+    // range) some CPUs slow down dramatically. We zero the state once it's
+    // negligibly small. Not a fix for the "held-note breakup" issue
+    // (which is upstream in the pitch quantizer), just cheap insurance.
+    this.state = s < 1e-12 ? 0 : s;
 
     return true;
   }

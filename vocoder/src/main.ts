@@ -24,7 +24,7 @@ import type { Category, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { CarrierSynth } from './audio/carrier';
 import { Vocoder } from './audio/vocoder';
 import { extractFeatures, type HandFeatures } from './gestures';
-import { midiName, midiToHz, quantizeToScale } from './audio/scales';
+import { midiName, midiToHz, quantizeToScaleHysteresis } from './audio/scales';
 import { MAPPING, currentScale } from './mapping';
 
 // ---------------------------------------------------------------------------
@@ -55,8 +55,10 @@ let micSource: MediaStreamAudioSourceNode | null = null;
 // the synth doesn't chatter when the user holds their fingers near the
 // boundary.
 let gateOpen = false;
-// Last MIDI note we sent to the carrier; only logged for debug display.
-let lastMidi = 0;
+// Last MIDI note we sent to the carrier. Used both for the debug display
+// AND as the previous-snap state for pitch hysteresis (so a held hand
+// doesn't flip-flop across a scale boundary).
+let lastSnappedMidi: number | null = null;
 
 // FPS tracking
 let frameCount = 0;
@@ -123,7 +125,8 @@ async function start(): Promise<void> {
     carrier = new CarrierSynth(audioCtx);
 
     setStatus('Loading vocoder…');
-    vocoder = await Vocoder.create(audioCtx);
+    // All vocoder knobs live in MAPPING.vocoder so they're easy to tune.
+    vocoder = await Vocoder.create(audioCtx, MAPPING.vocoder);
 
     // Mic -> vocoder modulator input.
     micSource = audioCtx.createMediaStreamSource(micStream);
@@ -244,12 +247,21 @@ function driveAudio(
   // --- Pitch mapping ----------------------------------------------------
   // wristY: 0 (top) -> midiHigh, 1 (bottom) -> midiLow. We also clamp the
   // small dead-zone bands at the edges where MediaPipe is jittery.
-  const { midiLow, midiHigh, yDeadZone } = MAPPING.pitch;
+  const { midiLow, midiHigh, yDeadZone, snapHysteresisSemitones } = MAPPING.pitch;
   const yClamped = clamp(f.wristY, yDeadZone, 1 - yDeadZone);
   const yNorm = (yClamped - yDeadZone) / (1 - 2 * yDeadZone); // 0..1
   const rawMidi = midiHigh - yNorm * (midiHigh - midiLow);
-  const snapped = quantizeToScale(rawMidi, MAPPING.scale.root, currentScale());
-  lastMidi = snapped;
+  // Hysteresis snap: stays on the previously committed note until rawMidi
+  // crosses the boundary by an extra `snapHysteresisSemitones`. Stops a
+  // steady hand near a scale boundary from flip-flopping between notes.
+  const snapped = quantizeToScaleHysteresis(
+    rawMidi,
+    lastSnappedMidi,
+    MAPPING.scale.root,
+    currentScale(),
+    snapHysteresisSemitones,
+  );
+  lastSnappedMidi = snapped;
   carrier.setFrequency(midiToHz(snapped));
 
   // --- Gate mapping (with hysteresis) ----------------------------------
@@ -306,10 +318,11 @@ function updateDebug(
   }
 
   if (lastRightFeatures) {
-    const hz = midiToHz(lastMidi);
+    const midi = lastSnappedMidi ?? 0;
+    const hz = midiToHz(midi);
     lines.push(
       `right: y=${lastRightFeatures.wristY.toFixed(2)}  pinch=${lastRightFeatures.pinch.toFixed(2)}  gate=${gateOpen ? 'OPEN' : 'closed'}`,
-      `note:  ${midiName(lastMidi)}  (${hz.toFixed(1)} Hz)`,
+      `note:  ${midiName(midi)}  (${hz.toFixed(1)} Hz)`,
     );
   } else {
     lines.push('right: (no right hand)');

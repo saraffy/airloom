@@ -86,3 +86,99 @@ export function midiName(midi: number): string {
   const octave = Math.floor(rounded / 12) - 1;
   return `${NOTE_NAMES[pc]}${octave}`;
 }
+
+// ----------------------------------------------------------------------------
+// Hysteresis snap
+// ----------------------------------------------------------------------------
+// quantizeToScale() is memoryless: every call returns the nearest scale note.
+// If the input sits near the midpoint between two scale notes, tiny frame-to-
+// frame jitter (camera noise, tracker wobble) flips the snap back and forth
+// each frame, and the carrier glides chase it -- audible as "breakup" on a
+// held note.
+//
+// quantizeToScaleHysteresis() fixes this with asymmetric boundaries:
+//   - When the current note is X, the boundary to switch UP is the
+//     midpoint(X, X_above) PLUS hystSemi.
+//   - The boundary to switch DOWN is midpoint(X, X_below) MINUS hystSemi.
+// So there's a dead band of 2*hystSemi around each natural boundary where
+// the snap stays put on whichever note we last committed to.
+// ----------------------------------------------------------------------------
+
+/**
+ * Find the next scale note above and below a given (already-quantized) MIDI
+ * note. If `midi` isn't on a scale degree, we bracket it with the nearest
+ * degrees on either side.
+ */
+function adjacentScaleNotes(
+  midi: number,
+  root: number,
+  scale: readonly number[],
+): { above: number; below: number } {
+  const semitone = midi - root;
+  const octave = Math.floor(semitone / 12);
+  const pc = ((semitone % 12) + 12) % 12;
+
+  let idx = -1;
+  for (let i = 0; i < scale.length; i++) {
+    if (scale[i] === pc) {
+      idx = i;
+      break;
+    }
+  }
+
+  if (idx < 0) {
+    // midi isn't on a scale note. Find the bracketing degrees.
+    let loIdx = scale.length - 1;
+    let hiIdx = 0;
+    let foundHi = false;
+    for (let i = 0; i < scale.length; i++) {
+      if (scale[i]! < pc) loIdx = i;
+      if (scale[i]! > pc && !foundHi) {
+        hiIdx = i;
+        foundHi = true;
+      }
+    }
+    return {
+      above: root + octave * 12 + scale[hiIdx]!,
+      below: root + octave * 12 + scale[loIdx]!,
+    };
+  }
+
+  const above =
+    idx === scale.length - 1
+      ? root + (octave + 1) * 12 + scale[0]!
+      : root + octave * 12 + scale[idx + 1]!;
+  const below =
+    idx === 0
+      ? root + (octave - 1) * 12 + scale[scale.length - 1]!
+      : root + octave * 12 + scale[idx - 1]!;
+
+  return { above, below };
+}
+
+/**
+ * Snap to nearest scale note, but stick to `previousSnap` until the input
+ * has crossed the natural midpoint by `hystSemi` extra semitones in either
+ * direction. Pass `previousSnap = null` on the first call.
+ *
+ * @param hystSemi  Hysteresis margin in semitones. 0.3 ≈ small dead band,
+ *                  1.0 ≈ very sticky note holds.
+ */
+export function quantizeToScaleHysteresis(
+  midi: number,
+  previousSnap: number | null,
+  root: number,
+  scale: readonly number[],
+  hystSemi: number,
+): number {
+  if (previousSnap === null) return quantizeToScale(midi, root, scale);
+
+  const { above, below } = adjacentScaleNotes(previousSnap, root, scale);
+  const upBoundary = (previousSnap + above) / 2 + hystSemi;
+  const dnBoundary = (previousSnap + below) / 2 - hystSemi;
+
+  if (midi >= upBoundary || midi <= dnBoundary) {
+    return quantizeToScale(midi, root, scale);
+  }
+  return previousSnap;
+}
