@@ -1,22 +1,26 @@
 // ============================================================================
-// main.ts -- Phase 1 entry point.
+// main.ts -- entry point.
 // ----------------------------------------------------------------------------
-// What this file does today (Phase 1):
-//   1. Wires up the "Start" button.
-//   2. Requests camera access (mic is requested too, so the Phase-3 vocoder
-//      can use it later without a second permission prompt).
-//   3. Streams the camera into a <video> and starts a render loop that:
-//        - draws the video frame onto the overlay canvas (mirrored), and
-//        - runs MediaPipe HandLandmarker, drawing up to 2 hand skeletons.
+// What this file does today (through Phase 2):
+//   1. Wires up the "Start" button (single user gesture: camera + mic + audio).
+//   2. Streams camera into a <video> and runs MediaPipe HandLandmarker each
+//      frame, drawing up to 2 hand skeletons on a mirrored canvas overlay.
+//   3. Builds a Web Audio CarrierSynth and drives it from the RIGHT hand:
+//        - vertical position (wristY)  ->  pitch, snapped to MAPPING.scale
+//        - pinch (thumb<->index)       ->  gate (open = play, closed = silence)
 //
-// What this file will grow into:
-//   - Phase 2 wires the hand landmarks to a Web Audio carrier synth.
-//   - Phase 3 introduces the mic-driven vocoder AudioWorklet.
-//   - Phase 4/5 add the gesture-mapping config, smoothing, master FX, UI.
+// What's still to come:
+//   - Phase 3: mic + 16-band vocoder AudioWorklet -> shapes the carrier.
+//   - Phase 4: left-hand chord/scale-degree selection, full smoothing.
+//   - Phase 5: master FX chain + UI polish.
 // ============================================================================
 
 import { createHandTracker, drawHand, type HandTracker } from './handTracking';
 import type { Category, NormalizedLandmark } from '@mediapipe/tasks-vision';
+import { CarrierSynth } from './audio/carrier';
+import { extractFeatures, type HandFeatures } from './gestures';
+import { midiName, midiToHz, quantizeToScale } from './audio/scales';
+import { MAPPING, currentScale } from './mapping';
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -34,8 +38,20 @@ const debugEl = document.getElementById('debug') as HTMLPreElement;
 let tracker: HandTracker | null = null;
 let running = false;
 let lastVideoTime = -1;
-// Holds the audio MediaStreamTrack we keep alive for Phase 3 (mic).
+// Audio engine pieces -- created on Start so the AudioContext has a user
+// gesture to authorize playback.
+let audioCtx: AudioContext | null = null;
+let carrier: CarrierSynth | null = null;
+// Mic stream is captured up-front but unused until Phase 3.
 let micStream: MediaStream | null = null;
+
+// Current gate state, used to apply hysteresis to the pinch threshold so
+// the synth doesn't chatter when the user holds their fingers near the
+// boundary.
+let gateOpen = false;
+// Last MIDI note we sent to the carrier; only logged for debug display.
+let lastMidi = 0;
+
 // FPS tracking
 let frameCount = 0;
 let lastFpsT = performance.now();
@@ -50,7 +66,7 @@ function setStatus(msg: string, kind: 'info' | 'ok' | 'err' = 'info'): void {
 
 // ---------------------------------------------------------------------------
 // Start flow -- requires a user gesture (button click) so the browser will
-// (a) prompt for camera/mic and (b) allow audio later in Phase 2+.
+// (a) prompt for camera/mic and (b) allow audio playback.
 // ---------------------------------------------------------------------------
 async function start(): Promise<void> {
   if (running) return;
@@ -89,8 +105,17 @@ async function start(): Promise<void> {
     setStatus('Loading hand-landmark model…');
     tracker = await createHandTracker();
 
+    // --- Audio engine -----------------------------------------------------
+    // The button click is the user gesture that authorizes audio playback.
+    audioCtx = new AudioContext();
+    // Some browsers create the context in "suspended" state even after a
+    // user gesture; resume() is a no-op if it's already running.
+    await audioCtx.resume();
+    carrier = new CarrierSynth(audioCtx);
+    carrier.output.connect(audioCtx.destination);
+
     running = true;
-    setStatus('Tracking. Wave at the camera.', 'ok');
+    setStatus('Ready. Raise your right hand and unpinch to play.', 'ok');
     requestAnimationFrame(renderLoop);
   } catch (err) {
     // MediaPipe + getUserMedia can throw DOMException, plain objects, or
@@ -105,8 +130,6 @@ async function start(): Promise<void> {
 
 function describeError(err: unknown): string {
   if (err instanceof Error) {
-    // DOMException uses .name for things like "NotAllowedError" -- include it
-    // for clarity when .message is empty or generic.
     return err.name && err.name !== 'Error'
       ? `${err.name}: ${err.message || '(no message)'}`
       : err.message || err.name || '(no message — see console)';
@@ -126,7 +149,8 @@ function describeError(err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// Render loop: draw mirrored video frame, run landmark detection, overlay.
+// Render loop: draw mirrored video frame, run landmark detection, overlay,
+// and drive the carrier synth from the right hand.
 // ---------------------------------------------------------------------------
 function renderLoop(): void {
   if (!running || !tracker) return;
@@ -144,6 +168,7 @@ function renderLoop(): void {
     const t = performance.now();
     const result = tracker.detect(video, t);
     drawDetections(result.landmarks, result.handedness);
+    driveAudio(result.landmarks, result.handedness);
     updateDebug(result.landmarks, result.handedness);
   }
 
@@ -159,22 +184,80 @@ function renderLoop(): void {
   requestAnimationFrame(renderLoop);
 }
 
+// ---------------------------------------------------------------------------
+// Audio driver: maps the RIGHT hand's features onto carrier pitch + gate.
+// All mapping constants live in mapping.ts so this code stays declarative.
+// ---------------------------------------------------------------------------
+
+// Cached features of the right hand for the debug readout.
+let lastRightFeatures: HandFeatures | null = null;
+
+function findHand(handedness: Category[][], label: 'Right' | 'Left'): number {
+  for (let i = 0; i < handedness.length; i++) {
+    if (handedness[i]?.[0]?.categoryName === label) return i;
+  }
+  return -1;
+}
+
+function driveAudio(
+  hands: NormalizedLandmark[][],
+  handedness: Category[][],
+): void {
+  if (!carrier) return;
+
+  const rightIdx = findHand(handedness, 'Right');
+  if (rightIdx < 0) {
+    // No right hand visible: close the gate; leave pitch where it is so the
+    // next note doesn't jump weirdly when the hand reappears.
+    if (gateOpen) {
+      carrier.setGate(false);
+      gateOpen = false;
+    }
+    lastRightFeatures = null;
+    return;
+  }
+
+  const f = extractFeatures(hands[rightIdx]!);
+  lastRightFeatures = f;
+
+  // --- Pitch mapping ----------------------------------------------------
+  // wristY: 0 (top) -> midiHigh, 1 (bottom) -> midiLow. We also clamp the
+  // small dead-zone bands at the edges where MediaPipe is jittery.
+  const { midiLow, midiHigh, yDeadZone } = MAPPING.pitch;
+  const yClamped = clamp(f.wristY, yDeadZone, 1 - yDeadZone);
+  const yNorm = (yClamped - yDeadZone) / (1 - 2 * yDeadZone); // 0..1
+  const rawMidi = midiHigh - yNorm * (midiHigh - midiLow);
+  const snapped = quantizeToScale(rawMidi, MAPPING.scale.root, currentScale());
+  lastMidi = snapped;
+  carrier.setFrequency(midiToHz(snapped));
+
+  // --- Gate mapping (with hysteresis) ----------------------------------
+  // Two thresholds prevent the gate from flickering when pinch sits right
+  // on the boundary. Open when pinch > pinchOpen; close when pinch < pinchClose.
+  const { pinchOpen, pinchClose } = MAPPING.gate;
+  if (!gateOpen && f.pinch >= pinchOpen) {
+    carrier.setGate(true);
+    gateOpen = true;
+  } else if (gateOpen && f.pinch <= pinchClose) {
+    carrier.setGate(false);
+    gateOpen = false;
+  }
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
 function drawDetections(
   hands: NormalizedLandmark[][],
   handedness: Category[][],
 ): void {
   for (let i = 0; i < hands.length; i++) {
-    // MediaPipe's handedness already matches the user's perspective when
-    // the video is mirrored: "Right" = user's physical right hand. Use the
-    // raw label directly.
     const userLabel = handedness[i]?.[0]?.categoryName ?? 'Hand';
-
-    // Color by user-perspective hand: right = mint, left = magenta.
     const color = userLabel === 'Right' ? '#5ee0a4' : '#e85ed0';
 
     drawHand(ctx, hands[i]!, { mirror: true, color });
 
-    // Tag the wrist with the label so it's obvious which hand is which.
     const wrist = hands[i]![0];
     if (wrist) {
       const wx = (1 - wrist.x) * canvas.width;
@@ -190,14 +273,30 @@ function updateDebug(
   hands: NormalizedLandmark[][],
   handedness: Category[][],
 ): void {
-  const lines: string[] = [`fps: ${fps.toFixed(1)}`, `hands: ${hands.length}`];
+  const lines: string[] = [
+    `fps: ${fps.toFixed(1)}    hands: ${hands.length}`,
+    `scale: ${MAPPING.scale.name} (root ${MAPPING.scale.root})`,
+  ];
+
+  if (lastRightFeatures) {
+    const hz = midiToHz(lastMidi);
+    lines.push(
+      `right: y=${lastRightFeatures.wristY.toFixed(2)}  pinch=${lastRightFeatures.pinch.toFixed(2)}  gate=${gateOpen ? 'OPEN' : 'closed'}`,
+      `note:  ${midiName(lastMidi)}  (${hz.toFixed(1)} Hz)`,
+    );
+  } else {
+    lines.push('right: (no right hand)');
+  }
+
+  // Quick per-hand wrist coordinates, for sanity-checking handedness.
   for (let i = 0; i < hands.length; i++) {
     const userLabel = handedness[i]?.[0]?.categoryName ?? '?';
     const wrist = hands[i]![0];
     lines.push(
-      `  [${i}] user=${userLabel}  wrist=(${wrist.x.toFixed(2)}, ${wrist.y.toFixed(2)})`,
+      `  [${i}] ${userLabel}  wrist=(${wrist.x.toFixed(2)}, ${wrist.y.toFixed(2)})`,
     );
   }
+
   debugEl.textContent = lines.join('\n');
 }
 
