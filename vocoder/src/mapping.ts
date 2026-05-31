@@ -12,6 +12,7 @@
 
 import { SCALES, type ScaleName } from './audio/scales';
 import type { VocoderOptions } from './audio/vocoder';
+import type { NoiseGateOptions } from './audio/noiseGate';
 
 export interface Mapping {
   pitch: {
@@ -50,6 +51,19 @@ export interface Mapping {
    * documented in audio/vocoder.ts -- see VocoderOptions.
    */
   vocoder: VocoderOptions;
+  /**
+   * Pass-through options to NoiseGate.create(). Documented in
+   * audio/noiseGate.ts. The gate sits in front of the vocoder modulator
+   * input so background noise never drives the bands.
+   */
+  noiseGate: NoiseGateOptions;
+  /**
+   * How many consecutive frames to keep a hand visible after MediaPipe
+   * stops reporting it. Bridges brief tracker dropouts without making a
+   * truly-gone hand stick around.
+   *  0 = no stickiness, ~3 = ~100ms at 30fps, ~6 = ~200ms.
+   */
+  handStickyFrames: number;
 }
 
 export const MAPPING: Mapping = {
@@ -72,12 +86,19 @@ export const MAPPING: Mapping = {
     bands: 24,                    // 16→24 for better vowel resolution
     lowHz: 80,
     highHz: 8000,
-    q: 5,                         // 6→5 to soften the rasp slightly
+    q: 5,                         // soft rasp; extra bands keep vowels clear
     attackSec: 0.005,             // ~5ms: punchy consonants
-    releaseSec: 0.015,            // 25→15ms: spectral envelope tracks vowels faster
-    dryMix: 0.12,                 // ~12% raw voice mixed in for naturalness
-    outputGain: 2.0,              // 3.0→2.0: extra bands sum louder
+    releaseSec: 0.020,            // 20ms: trades a touch of vowel snap for warble-free holds
+    dryMix: 0.12,                 // ~12% raw voice mixed in for naturalness (now gated)
+    outputGain: 3.5,              // restored to keep vocoded carrier the loud element
   },
+  noiseGate: {
+    thresholdDb: -45,             // typical room background sits below this
+    attackSec: 0.005,             // snap open when speech starts
+    releaseSec: 0.1,              // bridge inter-syllable gaps
+    envSmoothSec: 0.020,
+  },
+  handStickyFrames: 3,            // ~100ms bridge for tracker dropouts at 30fps
 };
 
 /** Convenience accessor for the current scale's semitone offsets. */

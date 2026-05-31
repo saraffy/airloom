@@ -1,5 +1,5 @@
 // ============================================================================
-// vocoder.ts -- 16-band channel vocoder.
+// vocoder.ts -- N-band channel vocoder.
 // ----------------------------------------------------------------------------
 // Topology (one band shown; we build N of these in parallel):
 //
@@ -8,7 +8,14 @@
 //                                                              ▼
 //   carrier (synth) ──> BPF[b] ──> GainNode[b].gain ◄──────────┘
 //                                       │
-//                                       └──> sum bus ──> output
+//                                       └──> internalSum ──> gateGain ──> output
+//   modulator (mic) ──> dryGain ──────────────^                ^
+//                                                              │
+//                                          master gate (mute/unmute), driven
+//                                          by setGate(open) -- one switch
+//                                          covers BOTH the vocoded carrier
+//                                          path and the dry mic blend so
+//                                          "hand down" = total silence.
 //
 // Why an AudioWorklet for the envelope follower?
 //   - Audio-rate gain modulation requires the envelope to be a real audio
@@ -76,9 +83,9 @@ const DEFAULTS: Required<VocoderOptions> = {
   highHz: 8000,
   q: 5,
   attackSec: 0.005,
-  releaseSec: 0.015,
+  releaseSec: 0.020,
   dryMix: 0.12,
-  outputGain: 2.0,
+  outputGain: 3.5,
 };
 
 /**
@@ -110,27 +117,39 @@ export class Vocoder {
   private readonly envNodes: AudioWorkletNode[] = [];
   private readonly vcaNodes: GainNode[] = [];
   private readonly dryGain: GainNode;
+  /** Internal accumulation bus where wet bands AND the dry blend land. */
+  private readonly internalSum: GainNode;
+  /** Master gate. 0 = silent, 1 = pass. setGate() ramps this. */
+  private readonly gateGain: GainNode;
 
   private constructor(ctx: AudioContext, opts: Required<VocoderOptions>) {
     this.ctx = ctx;
     this.opts = opts;
 
-    // Input/output hubs let callers connect once without caring about
-    // internal topology.
     this.modulatorIn = ctx.createGain();
     this.modulatorIn.gain.value = 1;
     this.carrierIn = ctx.createGain();
     this.carrierIn.gain.value = 1;
-    this.output = ctx.createGain();
-    this.output.gain.value = opts.outputGain;
 
-    // Dry mic blend: a small parallel path that sends the raw modulator
-    // directly into the output. ~10-15% of unprocessed voice softens the
-    // robotic character and aids intelligibility.
+    // Output chain:  internalSum (outputGain trim) -> gateGain -> output
+    // Splitting these means the master gate sits AFTER the dry-mix sum,
+    // so a closed gate silences everything together (vocoded + dry).
+    this.internalSum = ctx.createGain();
+    this.internalSum.gain.value = opts.outputGain;
+
+    this.gateGain = ctx.createGain();
+    this.gateGain.gain.value = 0; // start closed; setGate(true) opens it
+    this.internalSum.connect(this.gateGain);
+
+    this.output = ctx.createGain();
+    this.output.gain.value = 1; // exposed port; level lives in internalSum
+    this.gateGain.connect(this.output);
+
+    // Dry mic blend joins the internal sum (so it gets gated too).
     this.dryGain = ctx.createGain();
     this.dryGain.gain.value = opts.dryMix;
     this.modulatorIn.connect(this.dryGain);
-    this.dryGain.connect(this.output);
+    this.dryGain.connect(this.internalSum);
 
     this.bandFreqs = logSpacedBands(opts.lowHz, opts.highHz, opts.bands);
   }
@@ -150,7 +169,7 @@ export class Vocoder {
   }
 
   private buildBands(): void {
-    const { ctx, opts, modulatorIn, carrierIn, output, bandFreqs } = this;
+    const { ctx, opts, modulatorIn, carrierIn, internalSum, bandFreqs } = this;
 
     for (let i = 0; i < bandFreqs.length; i++) {
       const freq = bandFreqs[i]!;
@@ -194,9 +213,21 @@ export class Vocoder {
       // This is the key trick that makes the vocoder work.
       env.connect(vca.gain);
 
-      vca.connect(output);
+      vca.connect(internalSum);
       this.vcaNodes.push(vca);
     }
+  }
+
+  /**
+   * Open or close the master output gate. Smooth-ramped so it doesn't click.
+   * This sits AFTER the wet+dry sum, so a closed gate silences both paths.
+   */
+  setGate(open: boolean): void {
+    const target = open ? 1 : 0;
+    // Fast attack, slightly slower release -- matches a typical envelope feel
+    // and helps avoid clicks on rapid pinch toggles.
+    const tc = open ? 0.005 : 0.020;
+    this.gateGain.gain.setTargetAtTime(target, this.ctx.currentTime, tc);
   }
 
   /**

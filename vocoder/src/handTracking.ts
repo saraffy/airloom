@@ -18,6 +18,7 @@
 import {
   HandLandmarker,
   FilesetResolver,
+  type Category,
   type HandLandmarkerResult,
   type NormalizedLandmark,
 } from '@mediapipe/tasks-vision';
@@ -49,11 +50,14 @@ export async function createHandTracker(): Promise<HandTracker> {
     },
     runningMode: 'VIDEO',
     numHands: 2,
-    // Confidence thresholds tuned for live performance: prefer responsive
-    // tracking over rejecting marginal frames.
+    // Confidence thresholds tuned for live performance:
+    //   - Detection stays at 0.5 so we don't get spurious hands from noise.
+    //   - Presence / tracking lowered to 0.3 so brief confidence dips
+    //     (lighting changes, partial occlusion) don't drop the hand entirely.
+    //     The hand stabilizer below also bridges the rare full dropouts.
     minHandDetectionConfidence: 0.5,
-    minHandPresenceConfidence: 0.5,
-    minTrackingConfidence: 0.5,
+    minHandPresenceConfidence: 0.3,
+    minTrackingConfidence: 0.3,
   });
 
   return {
@@ -62,6 +66,90 @@ export async function createHandTracker(): Promise<HandTracker> {
     },
     close() {
       landmarker.close();
+    },
+  };
+}
+
+// ----------------------------------------------------------------------------
+// Hand stabilizer
+// ----------------------------------------------------------------------------
+// Even with relaxed confidence thresholds, MediaPipe occasionally drops a
+// hand for a frame or two (lighting blip, partial occlusion, tracker
+// re-init). That shows up as the skeleton flickering on and off and -- if
+// it's the right hand -- a momentary gate close.
+//
+// createHandStabilizer() returns a wrapper that caches the last-good
+// landmarks per handedness ("Left" / "Right") and re-injects them for up
+// to `maxStaleFrames` frames after MediaPipe stops reporting that hand.
+// Once a hand has been missing longer than that, it's dropped for real.
+// ----------------------------------------------------------------------------
+
+interface CacheEntry {
+  landmarks: NormalizedLandmark[];
+  handedness: Category[];
+  /** Frames since the underlying tracker last reported this hand. 0 = fresh. */
+  age: number;
+}
+
+export interface StabilizedResult {
+  landmarks: NormalizedLandmark[][];
+  handedness: Category[][];
+  /**
+   * Per-output-hand age in frames (0 = fresh this frame, >0 = sticky/cached).
+   * Same index as `landmarks` / `handedness`. Useful for UI feedback.
+   */
+  ages: number[];
+}
+
+export interface HandStabilizer {
+  reconcile(result: HandLandmarkerResult): StabilizedResult;
+  reset(): void;
+}
+
+export function createHandStabilizer(maxStaleFrames: number): HandStabilizer {
+  let left: CacheEntry | null = null;
+  let right: CacheEntry | null = null;
+
+  return {
+    reconcile(result: HandLandmarkerResult): StabilizedResult {
+      // Age out existing cache. Each entry counts up; if MediaPipe re-sees
+      // the hand below, age resets to 0.
+      if (left) left.age += 1;
+      if (right) right.age += 1;
+
+      // Update cache with what MediaPipe reported this frame.
+      for (let i = 0; i < result.landmarks.length; i++) {
+        const label = result.handedness[i]?.[0]?.categoryName;
+        const entry: CacheEntry = {
+          landmarks: result.landmarks[i]!,
+          handedness: result.handedness[i]!,
+          age: 0,
+        };
+        if (label === 'Left') left = entry;
+        else if (label === 'Right') right = entry;
+      }
+
+      const landmarks: NormalizedLandmark[][] = [];
+      const handedness: Category[][] = [];
+      const ages: number[] = [];
+
+      const push = (e: CacheEntry | null): CacheEntry | null => {
+        if (!e) return null;
+        if (e.age > maxStaleFrames) return null; // expire
+        landmarks.push(e.landmarks);
+        handedness.push(e.handedness);
+        ages.push(e.age);
+        return e;
+      };
+
+      left = push(left);
+      right = push(right);
+
+      return { landmarks, handedness, ages };
+    },
+    reset() {
+      left = null;
+      right = null;
     },
   };
 }

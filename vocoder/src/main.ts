@@ -1,28 +1,43 @@
 // ============================================================================
 // main.ts -- entry point.
 // ----------------------------------------------------------------------------
-// What this file does today (through Phase 3):
+// What this file does today (through Phase 3, post-tuning):
 //   1. Wires up the "Start" button (single user gesture: camera + mic + audio).
 //   2. Streams camera into a <video> and runs MediaPipe HandLandmarker each
 //      frame, drawing up to 2 hand skeletons on a mirrored canvas overlay.
+//      A stabilizer caches landmarks for a few frames so tracker dropouts
+//      don't flicker the skeleton (or chop the audio gate).
 //   3. Builds the audio engine:
-//        mic ────► Vocoder.modulatorIn ─┐
-//                                       ├─► destination
-//        CarrierSynth ► Vocoder.carrierIn ─┘
-//      The right hand drives the carrier (wristY -> scale-quantized pitch,
-//      pinch -> gate). When the user speaks/sings, the mic's per-band
-//      amplitude envelope shapes the carrier's matching bands -- the
-//      classic channel-vocoder effect.
+//
+//        mic ──> NoiseGate ──> Vocoder.modulatorIn ─┐                  ┌──> destination
+//                                                    ├─> Vocoder ──────┤
+//        CarrierSynth (always on) ──> Vocoder.carrierIn ┘   (master gate inside)
+//
+//      The right hand drives pitch+gate:
+//        - wristY  -> scale-quantized MIDI note (with hysteresis snap)
+//        - pinch   -> master gate on the vocoder output. Closed = TOTAL
+//                     silence (vocoded + dry mic together).
+//
+//      The NoiseGate keeps room noise from driving the vocoder bands.
+//      The vocoder's master gate makes "hand down" / "pinch closed" mute
+//      everything reachable from the mic, even while talking.
 //
 // What's still to come:
 //   - Phase 4: left-hand chord/scale-degree selection, full smoothing.
 //   - Phase 5: master FX chain (wet/dry, reverb, limiter) + UI polish.
 // ============================================================================
 
-import { createHandTracker, drawHand, type HandTracker } from './handTracking';
+import {
+  createHandStabilizer,
+  createHandTracker,
+  drawHand,
+  type HandStabilizer,
+  type HandTracker,
+} from './handTracking';
 import type { Category, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { CarrierSynth } from './audio/carrier';
 import { Vocoder } from './audio/vocoder';
+import { NoiseGate } from './audio/noiseGate';
 import { extractFeatures, type HandFeatures } from './gestures';
 import { midiName, midiToHz, quantizeToScaleHysteresis } from './audio/scales';
 import { MAPPING, currentScale } from './mapping';
@@ -41,6 +56,7 @@ const debugEl = document.getElementById('debug') as HTMLPreElement;
 // State
 // ---------------------------------------------------------------------------
 let tracker: HandTracker | null = null;
+let stabilizer: HandStabilizer | null = null;
 let running = false;
 let lastVideoTime = -1;
 // Audio engine pieces -- created on Start so the AudioContext has a user
@@ -48,17 +64,24 @@ let lastVideoTime = -1;
 let audioCtx: AudioContext | null = null;
 let carrier: CarrierSynth | null = null;
 let vocoder: Vocoder | null = null;
+let noiseGate: NoiseGate | null = null;
 let micStream: MediaStream | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
 
-// Current gate state, used to apply hysteresis to the pinch threshold so
-// the synth doesn't chatter when the user holds their fingers near the
-// boundary.
+// Master gate state (right hand visible + pinch open). When false,
+// vocoder.setGate(false) is in effect and output is silent.
 let gateOpen = false;
 // Last MIDI note we sent to the carrier. Used both for the debug display
 // AND as the previous-snap state for pitch hysteresis (so a held hand
 // doesn't flip-flop across a scale boundary).
 let lastSnappedMidi: number | null = null;
+// Number of consecutive frames the snap has been the same. Surfaced in the
+// debug panel so you can see hysteresis working: a steady hand should make
+// this number climb monotonically into the hundreds.
+let snapStableFrames = 0;
+// Per-output-hand "age" from the stabilizer (0 = fresh this frame, >0 =
+// sticky/cached). Shown in debug.
+let lastAges: number[] = [];
 
 // FPS tracking
 let frameCount = 0;
@@ -82,8 +105,6 @@ async function start(): Promise<void> {
   setStatus('Requesting camera + mic permissions…');
 
   try {
-    // Ask for camera AND mic up-front so we don't double-prompt later when
-    // Phase 3 wires up the vocoder.
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         width: { ideal: 640 },
@@ -97,54 +118,47 @@ async function start(): Promise<void> {
       },
     });
 
-    // Split video and audio: the <video> only needs video tracks.
     const videoOnly = new MediaStream(stream.getVideoTracks());
     micStream = new MediaStream(stream.getAudioTracks());
-    void micStream; // silence "unused" until Phase 3 consumes it
 
     video.srcObject = videoOnly;
     await video.play();
 
-    // Match canvas pixel size to the actual video resolution. We do this
-    // *after* play() so video.videoWidth/Height are populated.
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
 
     setStatus('Loading hand-landmark model…');
     tracker = await createHandTracker();
+    stabilizer = createHandStabilizer(MAPPING.handStickyFrames);
 
     // --- Audio engine -----------------------------------------------------
-    // The button click is the user gesture that authorizes audio playback.
     audioCtx = new AudioContext();
-    // Some browsers create the context in "suspended" state even after a
-    // user gesture; resume() is a no-op if it's already running.
     await audioCtx.resume();
 
-    // Build carrier first so the worklet registration (inside Vocoder.create)
-    // is the only async step that gates the wiring.
     carrier = new CarrierSynth(audioCtx);
+    // Carrier is permanently "on"; the master gate inside the Vocoder is
+    // now the single source of truth for audibility.
+    carrier.setGate(true);
 
     setStatus('Loading vocoder…');
-    // All vocoder knobs live in MAPPING.vocoder so they're easy to tune.
     vocoder = await Vocoder.create(audioCtx, MAPPING.vocoder);
 
-    // Mic -> vocoder modulator input.
+    setStatus('Loading noise gate…');
+    noiseGate = await NoiseGate.create(audioCtx, MAPPING.noiseGate);
+
+    // Audio graph:  mic -> noiseGate -> vocoder.modulatorIn
+    //               carrier -> vocoder.carrierIn
+    //               vocoder.output -> destination
     micSource = audioCtx.createMediaStreamSource(micStream);
-    micSource.connect(vocoder.modulatorIn);
-
-    // Carrier -> vocoder carrier input.
+    micSource.connect(noiseGate.node);
+    noiseGate.node.connect(vocoder.modulatorIn);
     carrier.output.connect(vocoder.carrierIn);
-
-    // Vocoder -> speakers.
     vocoder.output.connect(audioCtx.destination);
 
     running = true;
-    setStatus('Ready. Wear headphones! Right hand controls pitch; speak to shape the tone.', 'ok');
+    setStatus('Ready. Headphones recommended. Hand up + unpinch + voice = robot.', 'ok');
     requestAnimationFrame(renderLoop);
   } catch (err) {
-    // MediaPipe + getUserMedia can throw DOMException, plain objects, or
-    // strings -- not always proper Error instances. Coerce to a readable
-    // message so the UI never shows "undefined".
     console.error('Failed to start:', err);
     const message = describeError(err);
     setStatus(`Failed to start: ${message}`, 'err');
@@ -177,26 +191,26 @@ function describeError(err: unknown): string {
 // and drive the carrier synth from the right hand.
 // ---------------------------------------------------------------------------
 function renderLoop(): void {
-  if (!running || !tracker) return;
+  if (!running || !tracker || !stabilizer) return;
 
-  // Draw video frame (mirrored horizontally for selfie-style feedback).
   ctx.save();
   ctx.scale(-1, 1);
   ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
   ctx.restore();
 
-  // Only run inference when we have a new frame (HandLandmarker requires
-  // monotonically-increasing timestamps in VIDEO mode).
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
     const t = performance.now();
-    const result = tracker.detect(video, t);
-    drawDetections(result.landmarks, result.handedness);
-    driveAudio(result.landmarks, result.handedness);
-    updateDebug(result.landmarks, result.handedness);
+    const raw = tracker.detect(video, t);
+    // Bridge brief tracker dropouts (cached landmarks for `handStickyFrames`
+    // frames). This stabilises both the visible skeleton AND the audio gate.
+    const stable = stabilizer.reconcile(raw);
+    lastAges = stable.ages;
+    drawDetections(stable.landmarks, stable.handedness, stable.ages);
+    driveAudio(stable.landmarks, stable.handedness);
+    updateDebug(stable.landmarks, stable.handedness);
   }
 
-  // FPS tally
   frameCount += 1;
   const now = performance.now();
   if (now - lastFpsT >= 500) {
@@ -213,7 +227,6 @@ function renderLoop(): void {
 // All mapping constants live in mapping.ts so this code stays declarative.
 // ---------------------------------------------------------------------------
 
-// Cached features of the right hand for the debug readout.
 let lastRightFeatures: HandFeatures | null = null;
 
 function findHand(handedness: Category[][], label: 'Right' | 'Left'): number {
@@ -227,14 +240,13 @@ function driveAudio(
   hands: NormalizedLandmark[][],
   handedness: Category[][],
 ): void {
-  if (!carrier) return;
+  if (!carrier || !vocoder) return;
 
   const rightIdx = findHand(handedness, 'Right');
   if (rightIdx < 0) {
-    // No right hand visible: close the gate; leave pitch where it is so the
-    // next note doesn't jump weirdly when the hand reappears.
+    // No right hand visible (after stickiness): close the master gate.
     if (gateOpen) {
-      carrier.setGate(false);
+      vocoder.setGate(false);
       gateOpen = false;
     }
     lastRightFeatures = null;
@@ -245,15 +257,10 @@ function driveAudio(
   lastRightFeatures = f;
 
   // --- Pitch mapping ----------------------------------------------------
-  // wristY: 0 (top) -> midiHigh, 1 (bottom) -> midiLow. We also clamp the
-  // small dead-zone bands at the edges where MediaPipe is jittery.
   const { midiLow, midiHigh, yDeadZone, snapHysteresisSemitones } = MAPPING.pitch;
   const yClamped = clamp(f.wristY, yDeadZone, 1 - yDeadZone);
-  const yNorm = (yClamped - yDeadZone) / (1 - 2 * yDeadZone); // 0..1
+  const yNorm = (yClamped - yDeadZone) / (1 - 2 * yDeadZone);
   const rawMidi = midiHigh - yNorm * (midiHigh - midiLow);
-  // Hysteresis snap: stays on the previously committed note until rawMidi
-  // crosses the boundary by an extra `snapHysteresisSemitones`. Stops a
-  // steady hand near a scale boundary from flip-flopping between notes.
   const snapped = quantizeToScaleHysteresis(
     rawMidi,
     lastSnappedMidi,
@@ -261,18 +268,23 @@ function driveAudio(
     currentScale(),
     snapHysteresisSemitones,
   );
+  if (snapped === lastSnappedMidi) {
+    snapStableFrames += 1;
+  } else {
+    snapStableFrames = 0;
+  }
   lastSnappedMidi = snapped;
   carrier.setFrequency(midiToHz(snapped));
 
-  // --- Gate mapping (with hysteresis) ----------------------------------
-  // Two thresholds prevent the gate from flickering when pinch sits right
-  // on the boundary. Open when pinch > pinchOpen; close when pinch < pinchClose.
+  // --- Master gate (vocoder output) with pinch hysteresis ---------------
+  // The vocoder.setGate() controls the single master mute that covers
+  // BOTH the vocoded carrier path AND the dry-mic blend. Closed = silent.
   const { pinchOpen, pinchClose } = MAPPING.gate;
   if (!gateOpen && f.pinch >= pinchOpen) {
-    carrier.setGate(true);
+    vocoder.setGate(true);
     gateOpen = true;
   } else if (gateOpen && f.pinch <= pinchClose) {
-    carrier.setGate(false);
+    vocoder.setGate(false);
     gateOpen = false;
   }
 }
@@ -284,21 +296,28 @@ function clamp(v: number, lo: number, hi: number): number {
 function drawDetections(
   hands: NormalizedLandmark[][],
   handedness: Category[][],
+  ages: number[],
 ): void {
   for (let i = 0; i < hands.length; i++) {
     const userLabel = handedness[i]?.[0]?.categoryName ?? 'Hand';
-    const color = userLabel === 'Right' ? '#5ee0a4' : '#e85ed0';
+    const baseColor = userLabel === 'Right' ? '#5ee0a4' : '#e85ed0';
+    // Fade slightly when showing a stale (cached) hand so it's obvious
+    // when the tracker has briefly lost the hand and we're bridging.
+    const age = ages[i] ?? 0;
+    const fade = age > 0 ? Math.max(0.4, 1 - age * 0.18) : 1.0;
+    ctx.globalAlpha = fade;
 
-    drawHand(ctx, hands[i]!, { mirror: true, color });
+    drawHand(ctx, hands[i]!, { mirror: true, color: baseColor });
 
     const wrist = hands[i]![0];
     if (wrist) {
       const wx = (1 - wrist.x) * canvas.width;
       const wy = wrist.y * canvas.height;
-      ctx.fillStyle = color;
+      ctx.fillStyle = baseColor;
       ctx.font = '14px ui-sans-serif, system-ui, sans-serif';
-      ctx.fillText(userLabel, wx + 8, wy - 8);
+      ctx.fillText(age > 0 ? `${userLabel} (held)` : userLabel, wx + 8, wy - 8);
     }
+    ctx.globalAlpha = 1;
   }
 }
 
@@ -313,27 +332,30 @@ function updateDebug(
 
   if (vocoder) {
     lines.push(
-      `vocoder: ${vocoder.bandFreqs.length} bands, ${vocoder.bandFreqs[0]!.toFixed(0)}-${vocoder.bandFreqs[vocoder.bandFreqs.length - 1]!.toFixed(0)} Hz`,
+      `vocoder: ${vocoder.bandFreqs.length} bands, ${vocoder.bandFreqs[0]!.toFixed(0)}-${vocoder.bandFreqs[vocoder.bandFreqs.length - 1]!.toFixed(0)} Hz, gate=${gateOpen ? 'OPEN' : 'closed'}`,
     );
+  }
+  if (noiseGate) {
+    lines.push(`noiseGate: threshold ${MAPPING.noiseGate.thresholdDb ?? -45} dBFS`);
   }
 
   if (lastRightFeatures) {
     const midi = lastSnappedMidi ?? 0;
     const hz = midiToHz(midi);
     lines.push(
-      `right: y=${lastRightFeatures.wristY.toFixed(2)}  pinch=${lastRightFeatures.pinch.toFixed(2)}  gate=${gateOpen ? 'OPEN' : 'closed'}`,
-      `note:  ${midiName(midi)}  (${hz.toFixed(1)} Hz)`,
+      `right: y=${lastRightFeatures.wristY.toFixed(2)}  pinch=${lastRightFeatures.pinch.toFixed(2)}`,
+      `note:  ${midiName(midi)} (${hz.toFixed(1)} Hz)  snap stable for ${snapStableFrames} frames`,
     );
   } else {
     lines.push('right: (no right hand)');
   }
 
-  // Quick per-hand wrist coordinates, for sanity-checking handedness.
   for (let i = 0; i < hands.length; i++) {
     const userLabel = handedness[i]?.[0]?.categoryName ?? '?';
     const wrist = hands[i]![0];
+    const age = lastAges[i] ?? 0;
     lines.push(
-      `  [${i}] ${userLabel}  wrist=(${wrist.x.toFixed(2)}, ${wrist.y.toFixed(2)})`,
+      `  [${i}] ${userLabel}  wrist=(${wrist.x.toFixed(2)}, ${wrist.y.toFixed(2)})  age=${age}`,
     );
   }
 
