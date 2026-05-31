@@ -1,23 +1,28 @@
 // ============================================================================
 // main.ts -- entry point.
 // ----------------------------------------------------------------------------
-// What this file does today (through Phase 2):
+// What this file does today (through Phase 3):
 //   1. Wires up the "Start" button (single user gesture: camera + mic + audio).
 //   2. Streams camera into a <video> and runs MediaPipe HandLandmarker each
 //      frame, drawing up to 2 hand skeletons on a mirrored canvas overlay.
-//   3. Builds a Web Audio CarrierSynth and drives it from the RIGHT hand:
-//        - vertical position (wristY)  ->  pitch, snapped to MAPPING.scale
-//        - pinch (thumb<->index)       ->  gate (open = play, closed = silence)
+//   3. Builds the audio engine:
+//        mic ────► Vocoder.modulatorIn ─┐
+//                                       ├─► destination
+//        CarrierSynth ► Vocoder.carrierIn ─┘
+//      The right hand drives the carrier (wristY -> scale-quantized pitch,
+//      pinch -> gate). When the user speaks/sings, the mic's per-band
+//      amplitude envelope shapes the carrier's matching bands -- the
+//      classic channel-vocoder effect.
 //
 // What's still to come:
-//   - Phase 3: mic + 16-band vocoder AudioWorklet -> shapes the carrier.
 //   - Phase 4: left-hand chord/scale-degree selection, full smoothing.
-//   - Phase 5: master FX chain + UI polish.
+//   - Phase 5: master FX chain (wet/dry, reverb, limiter) + UI polish.
 // ============================================================================
 
 import { createHandTracker, drawHand, type HandTracker } from './handTracking';
 import type { Category, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { CarrierSynth } from './audio/carrier';
+import { Vocoder } from './audio/vocoder';
 import { extractFeatures, type HandFeatures } from './gestures';
 import { midiName, midiToHz, quantizeToScale } from './audio/scales';
 import { MAPPING, currentScale } from './mapping';
@@ -42,8 +47,9 @@ let lastVideoTime = -1;
 // gesture to authorize playback.
 let audioCtx: AudioContext | null = null;
 let carrier: CarrierSynth | null = null;
-// Mic stream is captured up-front but unused until Phase 3.
+let vocoder: Vocoder | null = null;
 let micStream: MediaStream | null = null;
+let micSource: MediaStreamAudioSourceNode | null = null;
 
 // Current gate state, used to apply hysteresis to the pinch threshold so
 // the synth doesn't chatter when the user holds their fingers near the
@@ -111,11 +117,26 @@ async function start(): Promise<void> {
     // Some browsers create the context in "suspended" state even after a
     // user gesture; resume() is a no-op if it's already running.
     await audioCtx.resume();
+
+    // Build carrier first so the worklet registration (inside Vocoder.create)
+    // is the only async step that gates the wiring.
     carrier = new CarrierSynth(audioCtx);
-    carrier.output.connect(audioCtx.destination);
+
+    setStatus('Loading vocoder…');
+    vocoder = await Vocoder.create(audioCtx);
+
+    // Mic -> vocoder modulator input.
+    micSource = audioCtx.createMediaStreamSource(micStream);
+    micSource.connect(vocoder.modulatorIn);
+
+    // Carrier -> vocoder carrier input.
+    carrier.output.connect(vocoder.carrierIn);
+
+    // Vocoder -> speakers.
+    vocoder.output.connect(audioCtx.destination);
 
     running = true;
-    setStatus('Ready. Raise your right hand and unpinch to play.', 'ok');
+    setStatus('Ready. Wear headphones! Right hand controls pitch; speak to shape the tone.', 'ok');
     requestAnimationFrame(renderLoop);
   } catch (err) {
     // MediaPipe + getUserMedia can throw DOMException, plain objects, or
@@ -277,6 +298,12 @@ function updateDebug(
     `fps: ${fps.toFixed(1)}    hands: ${hands.length}`,
     `scale: ${MAPPING.scale.name} (root ${MAPPING.scale.root})`,
   ];
+
+  if (vocoder) {
+    lines.push(
+      `vocoder: ${vocoder.bandFreqs.length} bands, ${vocoder.bandFreqs[0]!.toFixed(0)}-${vocoder.bandFreqs[vocoder.bandFreqs.length - 1]!.toFixed(0)} Hz`,
+    );
+  }
 
   if (lastRightFeatures) {
     const hz = midiToHz(lastMidi);
