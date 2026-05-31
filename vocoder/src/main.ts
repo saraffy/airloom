@@ -164,12 +164,10 @@ function drawDetections(
   handedness: Category[][],
 ): void {
   for (let i = 0; i < hands.length; i++) {
-    // MediaPipe reports handedness from the camera's POV. Because we mirror
-    // the video, "Right" in the result is actually the user's LEFT hand
-    // and vice versa -- so for *display labels* we swap. The raw label is
-    // still useful for gesture mapping; we'll deal with that in Phase 4.
-    const rawLabel = handedness[i]?.[0]?.categoryName ?? 'Hand';
-    const userLabel = rawLabel === 'Right' ? 'Left' : rawLabel === 'Left' ? 'Right' : rawLabel;
+    // MediaPipe's handedness already matches the user's perspective when
+    // the video is mirrored: "Right" = user's physical right hand. Use the
+    // raw label directly.
+    const userLabel = handedness[i]?.[0]?.categoryName ?? 'Hand';
 
     // Color by user-perspective hand: right = mint, left = magenta.
     const color = userLabel === 'Right' ? '#5ee0a4' : '#e85ed0';
@@ -194,8 +192,7 @@ function updateDebug(
 ): void {
   const lines: string[] = [`fps: ${fps.toFixed(1)}`, `hands: ${hands.length}`];
   for (let i = 0; i < hands.length; i++) {
-    const label = handedness[i]?.[0]?.categoryName ?? '?';
-    const userLabel = label === 'Right' ? 'Left' : label === 'Left' ? 'Right' : label;
+    const userLabel = handedness[i]?.[0]?.categoryName ?? '?';
     const wrist = hands[i]![0];
     lines.push(
       `  [${i}] user=${userLabel}  wrist=(${wrist.x.toFixed(2)}, ${wrist.y.toFixed(2)})`,
