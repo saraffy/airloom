@@ -39,6 +39,14 @@ export interface Mapping {
     pinchOpen: number;
     /** Pinch ratio at/below which the gate closes (sound off). */
     pinchClose: number;
+    /**
+     * How long (ms) to hold the audio gate open after the right hand
+     * disappears from the *stabilized* tracking stream. Decouples audio
+     * from tracker jitter -- 1-5 frame dropouts ride straight through.
+     * Stacks on top of handStickyFrames, so the total bridge is roughly
+     *   handStickyFrames * frameMs + trackingHoldMs.
+     */
+    trackingHoldMs: number;
   };
   scale: {
     /** Pitch class root of the key. 0=C, 2=D, 4=E, 5=F, 7=G, 9=A, 11=B. */
@@ -77,6 +85,8 @@ export const MAPPING: Mapping = {
     // Hysteresis band so the gate doesn't chatter near the threshold.
     pinchOpen: 0.55,
     pinchClose: 0.40,
+    // 300ms hangover -- brief tracker dropouts shouldn't chop the audio.
+    trackingHoldMs: 300,
   },
   scale: {
     root: 0,                      // C
@@ -90,15 +100,16 @@ export const MAPPING: Mapping = {
     attackSec: 0.005,             // ~5ms: punchy consonants
     releaseSec: 0.020,            // 20ms: trades a touch of vowel snap for warble-free holds
     dryMix: 0.12,                 // ~12% raw voice mixed in for naturalness (now gated)
-    outputGain: 3.5,              // restored to keep vocoded carrier the loud element
+    outputGain: 5.0,              // drives the compressor harder for more perceived loudness
+    makeupGain: 1.3,              // post-compressor boost; pair with outputGain to taste
   },
   noiseGate: {
-    thresholdDb: -45,             // typical room background sits below this
-    attackSec: 0.005,             // snap open when speech starts
-    releaseSec: 0.1,              // bridge inter-syllable gaps
+    thresholdDb: -48,             // -45 was clipping soft speech; loosened slightly
+    attackSec: 0.005,
+    releaseSec: 0.1,
     envSmoothSec: 0.020,
   },
-  handStickyFrames: 3,            // ~100ms bridge for tracker dropouts at 30fps
+  handStickyFrames: 8,            // ~270ms bridge for tracker dropouts at 30fps
 };
 
 /** Convenience accessor for the current scale's semitone offsets. */

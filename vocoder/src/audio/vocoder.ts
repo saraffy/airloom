@@ -71,10 +71,16 @@ export interface VocoderOptions {
    */
   dryMix?: number;
   /**
-   * Master output gain. Bands' summed level depends on bands/Q -- adjust if
-   * the vocoded signal is too quiet or clips.
+   * Pre-compressor output gain. Higher values feed the compressor harder,
+   * raising perceived loudness. Pair with `makeupGain` to taste.
    */
   outputGain?: number;
+  /**
+   * Post-compressor makeup gain. Compensates for the level reduction caused
+   * by compression. Typical range 1.0..2.0. Combined with `outputGain` this
+   * is the main loudness knob.
+   */
+  makeupGain?: number;
 }
 
 const DEFAULTS: Required<VocoderOptions> = {
@@ -85,7 +91,8 @@ const DEFAULTS: Required<VocoderOptions> = {
   attackSec: 0.005,
   releaseSec: 0.020,
   dryMix: 0.12,
-  outputGain: 3.5,
+  outputGain: 5.0,
+  makeupGain: 1.3,
 };
 
 /**
@@ -121,6 +128,11 @@ export class Vocoder {
   private readonly internalSum: GainNode;
   /** Master gate. 0 = silent, 1 = pass. setGate() ramps this. */
   private readonly gateGain: GainNode;
+  /** Smooths dynamics so the average gets a louder makeup boost. */
+  private readonly compressor: DynamicsCompressorNode;
+  private readonly makeupGain: GainNode;
+  /** Brickwall safety limiter at -1 dB before the exposed output. */
+  private readonly limiter: DynamicsCompressorNode;
 
   private constructor(ctx: AudioContext, opts: Required<VocoderOptions>) {
     this.ctx = ctx;
@@ -131,19 +143,52 @@ export class Vocoder {
     this.carrierIn = ctx.createGain();
     this.carrierIn.gain.value = 1;
 
-    // Output chain:  internalSum (outputGain trim) -> gateGain -> output
+    // ---- Output chain ------------------------------------------------
+    //   internalSum (outputGain trim)
+    //     -> gateGain (0 or 1)
+    //     -> compressor   (4:1, -18 dB threshold, soft knee)
+    //     -> makeupGain   (compensates for compression)
+    //     -> limiter      (-1 dB brickwall, prevents clipping)
+    //     -> output       (exposed port)
     // Splitting these means the master gate sits AFTER the dry-mix sum,
-    // so a closed gate silences everything together (vocoded + dry).
+    // so a closed gate silences everything together (vocoded + dry); and
+    // the makeup chain runs on the gated signal so we don't waste
+    // headroom on amplifying silence.
     this.internalSum = ctx.createGain();
     this.internalSum.gain.value = opts.outputGain;
 
     this.gateGain = ctx.createGain();
-    this.gateGain.gain.value = 0; // start closed; setGate(true) opens it
+    this.gateGain.gain.value = 0;
     this.internalSum.connect(this.gateGain);
 
+    // Moderate compressor: smooths the dynamic range so makeupGain can
+    // raise the average level without driving peaks into the limiter.
+    this.compressor = ctx.createDynamicsCompressor();
+    this.compressor.threshold.value = -18;
+    this.compressor.knee.value = 12;
+    this.compressor.ratio.value = 4;
+    this.compressor.attack.value = 0.003;
+    this.compressor.release.value = 0.15;
+    this.gateGain.connect(this.compressor);
+
+    this.makeupGain = ctx.createGain();
+    this.makeupGain.gain.value = opts.makeupGain;
+    this.compressor.connect(this.makeupGain);
+
+    // Brickwall safety: high ratio + zero knee + fast attack acts as a
+    // peak limiter. Keeps the final output below 0 dBFS even if
+    // compressor + makeupGain overshoot transiently.
+    this.limiter = ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = -1;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.001;
+    this.limiter.release.value = 0.05;
+    this.makeupGain.connect(this.limiter);
+
     this.output = ctx.createGain();
-    this.output.gain.value = 1; // exposed port; level lives in internalSum
-    this.gateGain.connect(this.output);
+    this.output.gain.value = 1;
+    this.limiter.connect(this.output);
 
     // Dry mic blend joins the internal sum (so it gets gated too).
     this.dryGain = ctx.createGain();
@@ -250,5 +295,16 @@ export class Vocoder {
   /** Set the dry-mic blend level (0..1). Smooth-ramps to avoid clicks. */
   setDryMix(level: number): void {
     this.dryGain.gain.setTargetAtTime(level, this.ctx.currentTime, 0.02);
+  }
+
+  /** Set the post-compressor makeup gain. */
+  setMakeupGain(g: number): void {
+    this.makeupGain.gain.setTargetAtTime(g, this.ctx.currentTime, 0.02);
+  }
+
+  /** Current compressor reduction in dB (positive number = amount of reduction). */
+  getCompressorReductionDb(): number {
+    // .reduction is a negative dB number (e.g. -6 means 6 dB of reduction).
+    return -this.compressor.reduction;
   }
 }

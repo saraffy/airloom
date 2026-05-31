@@ -71,6 +71,15 @@ let micSource: MediaStreamAudioSourceNode | null = null;
 // Master gate state (right hand visible + pinch open). When false,
 // vocoder.setGate(false) is in effect and output is silent.
 let gateOpen = false;
+// Hangover state for the audio gate. When the stabilized right hand
+// disappears we DON'T close the gate immediately -- we start a timer, and
+// only close the gate once MAPPING.gate.trackingHoldMs has elapsed without
+// the hand reappearing. This decouples audio from tracker jitter so a
+// 1-5 frame dropout is completely inaudible.
+//
+// null = hand currently visible; ms-timestamp = moment it disappeared.
+let trackingLostSinceT: number | null = null;
+
 // Last MIDI note we sent to the carrier. Used both for the debug display
 // AND as the previous-snap state for pitch hysteresis (so a held hand
 // doesn't flip-flop across a scale boundary).
@@ -87,6 +96,28 @@ let lastAges: number[] = [];
 let frameCount = 0;
 let lastFpsT = performance.now();
 let fps = 0;
+
+// MediaPipe inference timing. EMA over recent frames so the readout doesn't
+// flicker. Useful to confirm GPU vs CPU at a glance: GPU is typically
+// <15ms; CPU fallback is 30-100ms.
+let avgInferenceMs = 0;
+const INF_EMA_ALPHA = 0.1;
+
+// GPU availability flag. We pass `delegate: 'GPU'` to HandLandmarker, but
+// MediaPipe will silently fall back to CPU if WebGL isn't available --
+// best heuristic for "is GPU actually working" is to check both this flag
+// AND avgInferenceMs (<15ms means GPU is in use).
+const gpuAvailable: boolean = checkGpuAvailable();
+
+function checkGpuAvailable(): boolean {
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') ?? c.getContext('webgl');
+    return gl !== null;
+  } catch {
+    return false;
+  }
+}
 
 function setStatus(msg: string, kind: 'info' | 'ok' | 'err' = 'info'): void {
   statusEl.textContent = msg;
@@ -200,8 +231,18 @@ function renderLoop(): void {
 
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
+    // detect() is called AT MOST once per video frame (gated by the
+    // currentTime change above). Timestamp is performance.now() in ms,
+    // monotonic across the page lifetime -- this satisfies HandLandmarker's
+    // VIDEO-mode contract that timestamps strictly increase.
     const t = performance.now();
     const raw = tracker.detect(video, t);
+    const inferenceMs = performance.now() - t;
+    avgInferenceMs =
+      avgInferenceMs === 0
+        ? inferenceMs
+        : avgInferenceMs * (1 - INF_EMA_ALPHA) + inferenceMs * INF_EMA_ALPHA;
+
     // Bridge brief tracker dropouts (cached landmarks for `handStickyFrames`
     // frames). This stabilises both the visible skeleton AND the audio gate.
     const stable = stabilizer.reconcile(raw);
@@ -243,15 +284,30 @@ function driveAudio(
   if (!carrier || !vocoder) return;
 
   const rightIdx = findHand(handedness, 'Right');
+  const now = performance.now();
+
   if (rightIdx < 0) {
-    // No right hand visible (after stickiness): close the master gate.
-    if (gateOpen) {
+    // --- Right hand missing -------------------------------------------
+    // Start (or continue) the tracking-loss timer. We DO NOT touch the
+    // gate yet -- it stays in whatever state it was in -- so brief
+    // dropouts ride straight through with the audio unchanged.
+    if (trackingLostSinceT === null) trackingLostSinceT = now;
+    const lostMs = now - trackingLostSinceT;
+
+    if (gateOpen && lostMs > MAPPING.gate.trackingHoldMs) {
+      // Sustained loss: close the gate for real (smooth ramp).
       vocoder.setGate(false);
       gateOpen = false;
     }
-    lastRightFeatures = null;
+    // Pitch is intentionally left at the last value -- the carrier
+    // keeps gliding to it -- so a recovered hand picks up where it
+    // left off. lastRightFeatures stays so the debug box keeps the
+    // last reading visible.
     return;
   }
+
+  // --- Right hand present ----------------------------------------------
+  trackingLostSinceT = null;
 
   const f = extractFeatures(hands[rightIdx]!);
   lastRightFeatures = f;
@@ -325,18 +381,39 @@ function updateDebug(
   hands: NormalizedLandmark[][],
   handedness: Category[][],
 ): void {
+  const inferenceFps = avgInferenceMs > 0 ? Math.round(1000 / avgInferenceMs) : 0;
+  const delegate =
+    avgInferenceMs > 0 && avgInferenceMs < 20
+      ? 'GPU'
+      : avgInferenceMs > 0
+        ? 'CPU? (slow)'
+        : 'unknown';
+
+  // Hangover indicator: when the stabilized hand is missing but the gate
+  // is still open, we're inside the trackingHoldMs window. Surface this
+  // so it's obvious whether you're hearing the hangover hold sound.
+  const hangoverMs =
+    trackingLostSinceT !== null ? performance.now() - trackingLostSinceT : 0;
+
   const lines: string[] = [
     `fps: ${fps.toFixed(1)}    hands: ${hands.length}`,
+    `inference: ${avgInferenceMs.toFixed(1)}ms (~${inferenceFps} fps, delegate=${delegate}, gpu-available=${gpuAvailable})`,
     `scale: ${MAPPING.scale.name} (root ${MAPPING.scale.root})`,
   ];
 
   if (vocoder) {
+    const compDb = vocoder.getCompressorReductionDb();
     lines.push(
-      `vocoder: ${vocoder.bandFreqs.length} bands, ${vocoder.bandFreqs[0]!.toFixed(0)}-${vocoder.bandFreqs[vocoder.bandFreqs.length - 1]!.toFixed(0)} Hz, gate=${gateOpen ? 'OPEN' : 'closed'}`,
+      `vocoder: ${vocoder.bandFreqs.length} bands, ${vocoder.bandFreqs[0]!.toFixed(0)}-${vocoder.bandFreqs[vocoder.bandFreqs.length - 1]!.toFixed(0)} Hz, gate=${gateOpen ? 'OPEN' : 'closed'}, comp=${compDb.toFixed(1)}dB`,
     );
   }
   if (noiseGate) {
     lines.push(`noiseGate: threshold ${MAPPING.noiseGate.thresholdDb ?? -45} dBFS`);
+  }
+  if (hangoverMs > 0) {
+    lines.push(
+      `hangover: hand lost ${hangoverMs.toFixed(0)}ms ago (hold = ${MAPPING.gate.trackingHoldMs}ms, gate ${gateOpen ? 'still open' : 'closed'})`,
+    );
   }
 
   if (lastRightFeatures) {
