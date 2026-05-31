@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gesture Vocoder</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main id="app">
+      <header>
+        <h1>Gesture Vocoder</h1>
+        <p class="subtitle">Hand-controlled voice synthesizer</p>
+      </header>
+
+      <section class="stage">
+        <!-- Video element receives the raw camera feed. It's hidden visually
+             (we draw it into the canvas), but kept in the DOM because
+             MediaPipe's HandLandmarker reads frames directly from it. -->
+        <video id="video" playsinline autoplay muted></video>
+        <!-- Canvas overlay: we paint the camera frame here (mirrored) and
+             then draw the 21-point hand landmarks on top. -->
+        <canvas id="overlay"></canvas>
+      </section>
+
+      <section class="controls">
+        <button id="start-btn" type="button">Start</button>
+        <div id="status" class="status">Click <strong>Start</strong> to grant camera + mic access.</div>
+        <pre id="debug" class="debug"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
