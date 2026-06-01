@@ -94,14 +94,20 @@ export interface Mapping {
     voiceCount: number;
   };
   /**
-   * Two-hand horizontal distance -> reverb send level. Distance is the
+   * Two-hand horizontal distance -> reverb send level (AND tail length,
+   * via the same value driving masterFx.setTailLength). Distance is the
    * absolute difference in wrist x (0..1 frame-relative).
+   *
+   * `curveExp` bends the linear-mapped value with Math.pow before
+   * applying it. >1 keeps things subtle in the middle of the range and
+   * blooms dramatically near the top. =1 is linear.
    */
   reverbSend: {
     distanceMin: number;
     distanceMax: number;
     sendMin: number;
     sendMax: number;
+    curveExp: number;
   };
   /** Pass-through options to MasterFX. */
   masterFx: MasterFXOptions;
@@ -165,16 +171,22 @@ export const MAPPING: Mapping = {
     distanceMin: 0.10,
     distanceMax: 0.70,
     sendMin: 0,
-    sendMax: 0.7,
+    sendMax: 1.0,                 // full send at max distance
+    curveExp: 2.5,                // dramatic bloom: subtle mid-range, big at the ends
   },
   masterFx: {
     dryCarrierTrim: 0.3,
     initialWet: 1.0,              // FIXED wet/dry (left hand no longer drives this)
                                   // 1.0 = fully wet (pure vocoder character)
                                   // Lower toward 0 for more dry carrier in the mix
-    reverbDurationSec: 1.6,       // small-medium room tail
-    reverbDecay: 2.5,
-    reverbReturnGain: 0.55,
+    // Reverb: two IRs are precomputed and crossfaded by two-hand distance.
+    // SHORT = tight-room sound at hands-together; LONG = huge lush hall
+    // when arms are wide. reverbDecay slowed (was 2.5) so both tails are
+    // spacious and the decay envelope rolls off gently.
+    reverbShortSec: 1.2,
+    reverbLongSec: 3.5,
+    reverbDecay: 1.8,             // slower decay -> longer perceived tail
+    reverbReturnGain: 0.85,       // ↑ from 0.55 so the wet tail is clearly present
     limiterThresholdDb: -1,
     robotLevel: 1.0,              // master gain for the robot path when active
     cleanVoiceLevel: 1.2,         // master gain for the clean monitor when pinched

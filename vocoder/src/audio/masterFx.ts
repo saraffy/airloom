@@ -52,11 +52,23 @@ export interface MasterFXOptions {
   dryCarrierTrim?: number;
   /** Initial wet level in [0,1] (1 = full vocoded, 0 = full dry carrier). */
   initialWet?: number;
-  /** Reverb impulse-response duration in seconds. */
-  reverbDurationSec?: number;
   /**
-   * Reverb decay exponent. The envelope is (1 - t)^decay; higher = faster
-   * decay (drier feel). 1 = linear, 2.5 = small/medium room, 4+ = tight.
+   * Two convolver IRs are built at startup. Hand-distance crossfades
+   * between them via setTailLength(0..1):
+   *   0 = only the SHORT IR is sent to (tight, room-sized reverb)
+   *   1 = only the LONG  IR is sent to (huge, lush hall)
+   * Values between blend linearly so the tail GROWS continuously with
+   * distance, not just gets louder.
+   */
+  reverbShortSec?: number;
+  reverbLongSec?: number;
+  /**
+   * Reverb decay exponent. The envelope is (1 - t)^decay; LOWER = slower
+   * decay (longer perceived tail relative to total length).
+   *   1.0 = nearly linear, very long tail
+   *   1.8 = lush, hall-like
+   *   2.5 = small/medium room
+   *   4+  = tight, plate-like
    */
   reverbDecay?: number;
   /** Reverb return gain (level of the wet reverb tail). */
@@ -94,9 +106,10 @@ export interface MasterFXOptions {
 const DEFAULTS: Required<MasterFXOptions> = {
   dryCarrierTrim: 0.3,
   initialWet: 1.0,
-  reverbDurationSec: 1.6,
-  reverbDecay: 2.5,
-  reverbReturnGain: 0.55,
+  reverbShortSec: 1.2,
+  reverbLongSec: 3.5,
+  reverbDecay: 1.8,
+  reverbReturnGain: 0.85,
   limiterThresholdDb: -1,
   robotLevel: 1.0,
   cleanVoiceLevel: 1.2,
@@ -130,7 +143,13 @@ export class MasterFX {
   private readonly preLimitSum: GainNode;
   private readonly reverbSendGain: GainNode;
   private readonly reverbReturnGain: GainNode;
-  private readonly convolver: ConvolverNode;
+  /** Short IR -- "tight room". 100% active at tailLength=0. */
+  private readonly convolverShort: ConvolverNode;
+  /** Long IR -- "lush hall". 100% active at tailLength=1. */
+  private readonly convolverLong: ConvolverNode;
+  /** Per-convolver send gains; setTailLength crossfades these. */
+  private readonly shortPathGain: GainNode;
+  private readonly longPathGain: GainNode;
   private readonly limiter: DynamicsCompressorNode;
   /** Master mute for the entire vocoded/dry-carrier/reverb mix. */
   private readonly voxOutGain: GainNode;
@@ -166,14 +185,22 @@ export class MasterFX {
     this.vocodedIn.connect(this.wetGain).connect(this.preLimitSum);
     this.dryCarrierIn.connect(this.dryGain).connect(this.preLimitSum);
 
-    // --- Reverb: send -> convolver -> return -----------------------------
-    // ConvolverNode does normalized FFT convolution. Synthesized IR is
-    // stereo exponential-decay white noise -- cheap, plausible-sounding
-    // small-room reverb without shipping a wav file.
-    this.convolver = ctx.createConvolver();
-    this.convolver.buffer = createReverbIR(
+    // --- Reverb: send -> [short || long] -> return -----------------------
+    // Two ConvolverNodes in parallel, each with its own exponential-decay
+    // synthesized IR. shortPathGain and longPathGain crossfade between
+    // them so the TAIL LENGTH (not just wet level) grows with distance.
+    // ConvolverNode does normalized FFT convolution -- cheap, plausible
+    // reverb without shipping wavs.
+    this.convolverShort = ctx.createConvolver();
+    this.convolverShort.buffer = createReverbIR(
       ctx,
-      this.opts.reverbDurationSec,
+      this.opts.reverbShortSec,
+      this.opts.reverbDecay,
+    );
+    this.convolverLong = ctx.createConvolver();
+    this.convolverLong.buffer = createReverbIR(
+      ctx,
+      this.opts.reverbLongSec,
       this.opts.reverbDecay,
     );
 
@@ -182,13 +209,26 @@ export class MasterFX {
     this.reverbReturnGain = ctx.createGain();
     this.reverbReturnGain.gain.value = this.opts.reverbReturnGain;
 
-    // Tap the wet AND dry gains for the reverb send. No feedback risk:
-    // the only signal in is wetGain/dryGain (post-mix), the only signal
-    // out is reverbReturn -> preLimitSum.
+    // Path-crossfade gains: setTailLength ramps shortPathGain = 1-t,
+    // longPathGain = t. Linear crossfade -- at t=0.5 both are 0.5 so the
+    // user hears a blended IR.
+    this.shortPathGain = ctx.createGain();
+    this.shortPathGain.gain.value = 1; // start at full short tail
+    this.longPathGain = ctx.createGain();
+    this.longPathGain.gain.value = 0;
+
+    // Tap the wet AND dry gains for the reverb send (post-mix). No feedback
+    // risk: the only signals in are wetGain/dryGain, the only signal out
+    // is reverbReturn -> preLimitSum.
     this.wetGain.connect(this.reverbSendGain);
     this.dryGain.connect(this.reverbSendGain);
-    this.reverbSendGain.connect(this.convolver);
-    this.convolver.connect(this.reverbReturnGain).connect(this.preLimitSum);
+
+    // Send -> per-path gain -> convolver -> common return.
+    this.reverbSendGain.connect(this.shortPathGain).connect(this.convolverShort);
+    this.reverbSendGain.connect(this.longPathGain).connect(this.convolverLong);
+    this.convolverShort.connect(this.reverbReturnGain);
+    this.convolverLong.connect(this.reverbReturnGain);
+    this.reverbReturnGain.connect(this.preLimitSum);
 
     // --- Voice-blend: mic INTO the robot mix ---------------------------
     // Lands on preLimitSum so it's subject to voxOutGain (only audible
@@ -237,10 +277,24 @@ export class MasterFX {
     this.dryGain.gain.setTargetAtTime(d, t, 0.02);
   }
 
-  /** Reverb send level (0..1). Now actually routes to the convolver. */
+  /** Reverb send level (0..1). Routes the wet+dry mix into the convolvers. */
   setReverbSend(level: number): void {
     const l = Math.max(0, Math.min(1, level));
     this.reverbSendGain.gain.setTargetAtTime(l, this.ctx.currentTime, 0.05);
+  }
+
+  /**
+   * Linear crossfade between the short and long IRs.
+   *   0 = pure SHORT tail (tight room)
+   *   1 = pure LONG  tail (lush hall)
+   * Smooth-ramped so gestures don't introduce zipper.
+   */
+  setTailLength(t: number): void {
+    const c = Math.max(0, Math.min(1, t));
+    const now = this.ctx.currentTime;
+    const tc = 0.05;
+    this.shortPathGain.gain.setTargetAtTime(1 - c, now, tc);
+    this.longPathGain.gain.setTargetAtTime(c, now, tc);
   }
 
   /**
@@ -294,6 +348,11 @@ export class MasterFX {
 
   get voiceBlendValue(): number {
     return this.voiceBlendGain.gain.value;
+  }
+
+  /** Current short/long IR crossfade position (0 = short, 1 = long). */
+  get tailLength(): number {
+    return this.longPathGain.gain.value;
   }
 
   /** Current limiter gain reduction in dB (positive number = reduction amount). */

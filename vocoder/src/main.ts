@@ -688,13 +688,21 @@ function driveAudio(
     const rWristX = hands[rightIdx]![0]!.x;
     const rawDist = Math.abs(lWristX - rWristX);
     const smDist = smoothHandDistance!.filter(rawDist, now);
-    const { distanceMin, distanceMax, sendMin, sendMax } = MAPPING.reverbSend;
-    const send = mapRange(smDist, distanceMin, distanceMax, sendMin, sendMax);
+    const { distanceMin, distanceMax, sendMin, sendMax, curveExp } = MAPPING.reverbSend;
+    // Normalize to [0,1], bend with a power curve so the response feels
+    // dramatic (subtle at small/medium separation, blooming near full arms-wide).
+    const tNorm = mapRange(smDist, distanceMin, distanceMax, 0, 1);
+    const curved = Math.pow(tNorm, curveExp);
+    const send = sendMin + (sendMax - sendMin) * curved;
     masterFx.setReverbSend(send);
+    // Same curved value drives the SHORT->LONG IR crossfade so the tail
+    // GROWS with distance, not just gets louder.
+    masterFx.setTailLength(curved);
     lastReverbSend = send;
   } else {
-    // Only one hand visible: no send.
+    // Only one hand visible: no send, collapse to short tail.
     masterFx.setReverbSend(0);
+    masterFx.setTailLength(0);
     lastReverbSend = 0;
     smoothHandDistance?.reset();
   }
@@ -911,8 +919,9 @@ function updateDebug(
     lines.push(`triad: [${triadMidis.map(midiName).join(', ')}] @ [${audibleLevels.join(', ')}]`);
   }
   const fixedWet = masterFx ? masterFx.wetLevel : MAPPING.masterFx.initialWet ?? 1;
+  const tail = masterFx ? masterFx.tailLength : 0;
   lines.push(
-    `master: wet=${(fixedWet * 100).toFixed(0)}% (fixed)  reverbSend=${(lastReverbSend * 100).toFixed(0)}%`,
+    `master: wet=${(fixedWet * 100).toFixed(0)}% (fixed)  reverbSend=${(lastReverbSend * 100).toFixed(0)}%  tail=${(tail * 100).toFixed(0)}% (short↔long)`,
   );
 
   for (let i = 0; i < hands.length; i++) {
