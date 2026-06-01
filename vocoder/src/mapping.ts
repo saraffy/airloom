@@ -147,9 +147,13 @@ export const MAPPING: Mapping = {
     q: 5,                         // soft rasp; extra bands keep vowels clear
     attackSec: 0.005,             // ~5ms: punchy consonants
     releaseSec: 0.020,            // 20ms: trades a touch of vowel snap for warble-free holds
-    dryMix: 0.12,                 // ~12% raw voice mixed in for naturalness (now gated)
-    outputGain: 5.0,              // drives the compressor harder for more perceived loudness
-    makeupGain: 1.3,              // post-compressor boost; pair with outputGain to taste
+    dryMix: 0.0,                  // raw mic into vocoded output. 0 = pure robot;
+                                  // raise (e.g. 0.05) ONLY if you want some
+                                  // natural voice character. Was 0.12 -> bled
+                                  // into the unpinched signal and made it
+                                  // sound voice-like rather than robotic.
+    outputGain: 7.0,              // 5→7: more drive into the compressor for loudness
+    makeupGain: 1.6,              // 1.3→1.6: pair with outputGain for the robot punch
   },
   noiseGate: {
     // Open/close hysteresis so inter-syllable dips don't chop speech.
@@ -191,6 +195,9 @@ export const MAPPING: Mapping = {
     reverbDecay: 2.5,
     reverbReturnGain: 0.55,
     limiterThresholdDb: -1,
+    robotLevel: 1.0,              // master gain for the robot path when active
+    cleanVoiceLevel: 1.2,         // master gain for the clean monitor when pinched
+    modeXfadeSec: 0.015,          // smooth crossfade between robot/clean/silence
   },
   smoothing: {
     // Hand tracking runs at 30 fps with notable per-frame jitter.

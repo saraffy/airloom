@@ -197,6 +197,9 @@ button#start-btn:disabled {
 .meter-value.on {
   color: var(--accent);
 }
+.meter-value.on-clean {
+  color: #6ec5ff;
+}
 .bar {
   height: 10px;
   background: #1a1c22;

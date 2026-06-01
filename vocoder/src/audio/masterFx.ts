@@ -1,5 +1,5 @@
 // ============================================================================
-// masterFx.ts -- master output chain (complete after Phase 5).
+// masterFx.ts -- master output chain.
 // ----------------------------------------------------------------------------
 // Sits between the vocoder and the destination. Responsibilities:
 //
@@ -7,26 +7,31 @@
 //     (driven by left-hand openness via main.ts).
 //   - Convolver reverb with a synthesized exponential-decay noise IR
 //     (driven by two-hand distance).
+//   - Mode crossfade between the robot path (vocoder + dry carrier +
+//     reverb) and a CLEAN VOICE monitor path (raw mic). Pinch toggles
+//     between modes; setMode() does a smooth ~15ms exponential
+//     crossfade so there are no clicks.
 //   - Final brickwall limiter on the SUMMED output. The vocoder's internal
-//     limiter only catches the vocoded path; this one catches dry carrier
-//     and reverb-tail peaks too.
+//     limiter only catches the vocoded path; this one also protects the
+//     dry carrier, reverb tail, AND clean voice paths.
 //
 // Topology:
 //
-//   vocodedIn   ──► wetGain ───┐
-//                              ├──► preLimitSum ──► limiter ──► output
-//   dryCarrierIn ──► dryGain ──┤
-//                              │
-//   wetGain ──► reverbSend ──► Convolver ──► reverbReturn ──► preLimitSum
-//   dryGain ──► reverbSend ───┘                                ▲
-//                                                              │
-//                                                            (sum)
+//   vocodedIn    ──► wetGain ───┐
+//                               ├──► preLimitSum ──► voxOutGain ──┐
+//   dryCarrierIn ──► dryGain ───┤                                  │
+//                                                                  ├──► limiter ──► output
+//                                                                  │
+//   cleanVoiceIn ──► cleanVoxGain ─────────────────────────────────┘
 //
-// Reverb send taps the PRE-mix signals (wetGain + dryGain outputs) so the
-// reverb hears whatever the user's current mix is, but the dry/wet
-// FADE STILL APPLIES TO THE DRY PATH ONLY -- reverb tail is unaffected
-// by openness. This keeps the reverb feel consistent as you blend.
+//   wetGain/dryGain ──► reverbSend ──► Convolver ──► reverbReturn ──► preLimitSum
+//
+// The wet/dry crossfade applies to the DRY CARRIER blend only. The clean
+// voice path is its own thing -- it doesn't go through wet/dry or reverb,
+// and voxOutGain/cleanVoxGain are mutually exclusive (driven by setMode).
 // ============================================================================
+
+export type MasterMode = 'robot' | 'cleanVoice' | 'silence';
 
 export interface MasterFXOptions {
   /**
@@ -47,6 +52,19 @@ export interface MasterFXOptions {
   reverbReturnGain?: number;
   /** Master peak limiter threshold (dBFS). -1 = just below clipping. */
   limiterThresholdDb?: number;
+  /**
+   * Robot-path gain when setMode('robot') is active. 1.0 is unity -- the
+   * vocoder's own outputGain/makeupGain do most of the level-setting.
+   */
+  robotLevel?: number;
+  /**
+   * Clean-voice-path gain when setMode('cleanVoice') is active. Mic is
+   * unprocessed so a small boost is usually appropriate to match the
+   * perceived loudness of the vocoded robot path.
+   */
+  cleanVoiceLevel?: number;
+  /** Crossfade time constant (sec) for setMode transitions. */
+  modeXfadeSec?: number;
 }
 
 const DEFAULTS: Required<MasterFXOptions> = {
@@ -56,6 +74,9 @@ const DEFAULTS: Required<MasterFXOptions> = {
   reverbDecay: 2.5,
   reverbReturnGain: 0.55,
   limiterThresholdDb: -1,
+  robotLevel: 1.0,
+  cleanVoiceLevel: 1.2,
+  modeXfadeSec: 0.015,
 };
 
 export class MasterFX {
@@ -64,6 +85,11 @@ export class MasterFX {
   readonly vocodedIn: GainNode;
   /** Connect the dry carrier signal here (parallel tap from CarrierSynth). */
   readonly dryCarrierIn: GainNode;
+  /**
+   * Connect the raw mic here. Routed to the clean-voice monitor path,
+   * which is only audible when setMode('cleanVoice') is active.
+   */
+  readonly cleanVoiceIn: GainNode;
   /** Final summed + limited output. Connect this to destination. */
   readonly output: GainNode;
 
@@ -75,7 +101,12 @@ export class MasterFX {
   private readonly reverbReturnGain: GainNode;
   private readonly convolver: ConvolverNode;
   private readonly limiter: DynamicsCompressorNode;
+  /** Master mute for the entire vocoded/dry-carrier/reverb mix. */
+  private readonly voxOutGain: GainNode;
+  /** Master mute for the clean-voice monitor path. */
+  private readonly cleanVoxGain: GainNode;
   private currentWet: number;
+  private currentMode: MasterMode = 'silence';
 
   constructor(ctx: AudioContext, opts: MasterFXOptions = {}) {
     this.ctx = ctx;
@@ -85,6 +116,7 @@ export class MasterFX {
     // --- Input/output hubs ----------------------------------------------
     this.vocodedIn = ctx.createGain();
     this.dryCarrierIn = ctx.createGain();
+    this.cleanVoiceIn = ctx.createGain();
     this.output = ctx.createGain();
 
     // --- Wet/dry pair (left-hand openness drives setWetDry) -------------
@@ -124,17 +156,30 @@ export class MasterFX {
     this.reverbSendGain.connect(this.convolver);
     this.convolver.connect(this.reverbReturnGain).connect(this.preLimitSum);
 
+    // --- Mode crossfade gains -------------------------------------------
+    // The robot path (vocoded + dry carrier + reverb) and the clean voice
+    // path are mutually exclusive. setMode() ramps voxOutGain and
+    // cleanVoxGain in opposite directions to crossfade.
+    this.voxOutGain = ctx.createGain();
+    this.voxOutGain.gain.value = 0;
+    this.preLimitSum.connect(this.voxOutGain);
+
+    this.cleanVoxGain = ctx.createGain();
+    this.cleanVoxGain.gain.value = 0;
+    this.cleanVoiceIn.connect(this.cleanVoxGain);
+
     // --- Master brickwall limiter ---------------------------------------
-    // Catches summed peaks across vocoded + dry + reverb tail. The
-    // vocoder's internal limiter only sees its own output, so this is
-    // the *only* limiter the dry-carrier path passes through.
+    // Catches summed peaks across vocoded + dry + reverb tail AND the
+    // clean monitor path. -1 dBFS, hard knee, 20:1.
     this.limiter = ctx.createDynamicsCompressor();
     this.limiter.threshold.value = this.opts.limiterThresholdDb;
     this.limiter.knee.value = 0;
     this.limiter.ratio.value = 20;
     this.limiter.attack.value = 0.001;
     this.limiter.release.value = 0.05;
-    this.preLimitSum.connect(this.limiter).connect(this.output);
+    this.voxOutGain.connect(this.limiter);
+    this.cleanVoxGain.connect(this.limiter);
+    this.limiter.connect(this.output);
   }
 
   /**
@@ -154,6 +199,37 @@ export class MasterFX {
   setReverbSend(level: number): void {
     const l = Math.max(0, Math.min(1, level));
     this.reverbSendGain.gain.setTargetAtTime(l, this.ctx.currentTime, 0.05);
+  }
+
+  /**
+   * Switch between the three master modes. Crossfade is exponential
+   * (setTargetAtTime) so it's smooth/click-free at any speed.
+   *   - 'robot'     : voxOutGain -> robotLevel; cleanVoxGain -> 0
+   *   - 'cleanVoice': voxOutGain -> 0;          cleanVoxGain -> cleanVoiceLevel
+   *   - 'silence'   : both -> 0
+   */
+  setMode(mode: MasterMode): void {
+    this.currentMode = mode;
+    const t = this.ctx.currentTime;
+    const tc = this.opts.modeXfadeSec;
+    let voxTarget = 0;
+    let cleanTarget = 0;
+    switch (mode) {
+      case 'robot':
+        voxTarget = this.opts.robotLevel;
+        break;
+      case 'cleanVoice':
+        cleanTarget = this.opts.cleanVoiceLevel;
+        break;
+      case 'silence':
+        break;
+    }
+    this.voxOutGain.gain.setTargetAtTime(voxTarget, t, tc);
+    this.cleanVoxGain.gain.setTargetAtTime(cleanTarget, t, tc);
+  }
+
+  get mode(): MasterMode {
+    return this.currentMode;
   }
 
   get wetLevel(): number {

@@ -41,7 +41,7 @@ import type { Category, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { CarrierSynth } from './audio/carrier';
 import { Vocoder } from './audio/vocoder';
 import { NoiseGate } from './audio/noiseGate';
-import { MasterFX } from './audio/masterFx';
+import { MasterFX, type MasterMode } from './audio/masterFx';
 import { extractFeatures, type HandFeatures } from './gestures';
 import {
   chordFromScale,
@@ -144,9 +144,13 @@ let gatedPath: GainNode | null = null;
 let bypassPath: GainNode | null = null;
 let noiseGateBypassed = false;
 
-// Master gate state (right hand visible + pinch open). When false,
-// vocoder.setGate(false) is in effect and output is silent.
-let gateOpen = false;
+// Master mode driven by hand+pinch state. Pinch now toggles the user
+// between the vocoded "robot" mix and a CLEAN raw-mic monitor path; hand
+// absent (after hangover) closes to silence. setMode crossfades smoothly.
+let masterMode: MasterMode = 'silence';
+// Pinch hysteresis: true when the user's fingers are touching (clean
+// voice monitor). Initial state = false (unpinched / robot).
+let pinchClosed = false;
 // Hangover state for the audio gate. When the stabilized right hand
 // disappears we DON'T close the gate immediately -- we start a timer, and
 // only close the gate once MAPPING.gate.trackingHoldMs has elapsed without
@@ -273,10 +277,22 @@ function installScalePickers(): void {
 // Meter panel -- live, human-readable state. Called each frame.
 // ---------------------------------------------------------------------------
 function updateMeters(): void {
-  // Gate
-  meterGate.textContent = gateOpen ? 'OPEN' : 'closed';
-  meterGate.classList.toggle('on', gateOpen);
-  meterGate.classList.toggle('off', !gateOpen);
+  // Mode (was "Gate" - now tri-state: ROBOT / CLEAN / silent)
+  meterGate.classList.remove('on', 'off', 'on-clean');
+  switch (masterMode) {
+    case 'robot':
+      meterGate.textContent = 'ROBOT';
+      meterGate.classList.add('on');
+      break;
+    case 'cleanVoice':
+      meterGate.textContent = 'CLEAN';
+      meterGate.classList.add('on-clean');
+      break;
+    case 'silence':
+      meterGate.textContent = 'silent';
+      meterGate.classList.add('off');
+      break;
+  }
 
   // Note
   if (lastRightFeatures && lastSnappedMidi !== null) {
@@ -471,7 +487,17 @@ async function start(): Promise<void> {
     carrier.output.connect(vocoder.carrierIn);
     carrier.output.connect(masterFx.dryCarrierIn);
     vocoder.output.connect(masterFx.vocodedIn);
+
+    // Clean-voice monitor: raw mic straight to masterFx.cleanVoiceIn.
+    // Only audible when masterFx.setMode('cleanVoice') is active (pinched).
+    micSource.connect(masterFx.cleanVoiceIn);
+
     masterFx.output.connect(audioCtx.destination);
+
+    // The vocoder's internal master gate is now redundant -- MasterFX
+    // handles muting via setMode. Open the vocoder gate permanently so
+    // the vocoded signal flows whenever MasterFX wants it.
+    vocoder.setGate(true);
 
     installNoiseGateToggle();
 
@@ -629,6 +655,12 @@ function updateFingerExtension(
   return ratio >= openThreshold;
 }
 
+function setMasterMode(target: MasterMode): void {
+  if (!masterFx || masterMode === target) return;
+  masterFx.setMode(target);
+  masterMode = target;
+}
+
 function driveAudio(
   hands: NormalizedLandmark[][],
   handedness: Category[][],
@@ -714,9 +746,8 @@ function driveAudio(
     if (trackingLostSinceT === null) trackingLostSinceT = now;
     const lostMs = now - trackingLostSinceT;
 
-    if (gateOpen && lostMs > MAPPING.gate.trackingHoldMs) {
-      vocoder.setGate(false);
-      gateOpen = false;
+    if (masterMode !== 'silence' && lostMs > MAPPING.gate.trackingHoldMs) {
+      setMasterMode('silence');
     }
     // Pitch and chord voicing are intentionally left at last values --
     // the carrier holds whatever it was playing so a recovered hand
@@ -763,15 +794,19 @@ function driveAudio(
   const freqs = chordMidis.map(midiToHz);
   carrier.setVoices(freqs);
 
-  // --- Master gate (vocoder output) with pinch hysteresis ---------------
+  // --- Mode crossfade driven by pinch with hysteresis ------------------
+  //   pinch HIGH (fingers spread, "unpinched") -> robot mix
+  //   pinch LOW  (fingers touching, "pinched") -> clean voice monitor
+  // Uses the same threshold pair as the old pinch-gate, but the SEMANTICS
+  // are inverted: pinch is now a positive "monitor my real voice" gesture
+  // rather than a "mute" gesture.
   const { pinchOpen, pinchClose } = MAPPING.gate;
-  if (!gateOpen && f.pinch >= pinchOpen) {
-    vocoder.setGate(true);
-    gateOpen = true;
-  } else if (gateOpen && f.pinch <= pinchClose) {
-    vocoder.setGate(false);
-    gateOpen = false;
+  if (!pinchClosed && f.pinch <= pinchClose) {
+    pinchClosed = true;
+  } else if (pinchClosed && f.pinch >= pinchOpen) {
+    pinchClosed = false;
   }
+  setMasterMode(pinchClosed ? 'cleanVoice' : 'robot');
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -856,7 +891,7 @@ function updateDebug(
   if (vocoder) {
     const compDb = vocoder.getCompressorReductionDb();
     lines.push(
-      `vocoder: ${vocoder.bandFreqs.length} bands, ${vocoder.bandFreqs[0]!.toFixed(0)}-${vocoder.bandFreqs[vocoder.bandFreqs.length - 1]!.toFixed(0)} Hz, gate=${gateOpen ? 'OPEN' : 'closed'}, comp=${compDb.toFixed(1)}dB`,
+      `vocoder: ${vocoder.bandFreqs.length} bands, ${vocoder.bandFreqs[0]!.toFixed(0)}-${vocoder.bandFreqs[vocoder.bandFreqs.length - 1]!.toFixed(0)} Hz, mode=${masterMode}, comp=${compDb.toFixed(1)}dB`,
     );
   }
   if (noiseGate) {
@@ -867,7 +902,7 @@ function updateDebug(
   }
   if (hangoverMs > 0) {
     lines.push(
-      `hangover: hand lost ${hangoverMs.toFixed(0)}ms ago (hold = ${MAPPING.gate.trackingHoldMs}ms, gate ${gateOpen ? 'still open' : 'closed'})`,
+      `hangover: hand lost ${hangoverMs.toFixed(0)}ms ago (hold = ${MAPPING.gate.trackingHoldMs}ms, mode=${masterMode})`,
     );
   }
 
