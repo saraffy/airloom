@@ -2,31 +2,33 @@
 // noiseGate.ts
 // ----------------------------------------------------------------------------
 // Thin TypeScript wrapper around the noise-gate AudioWorkletProcessor.
-// Provides an async factory that registers the processor module once and
-// returns a NoiseGate instance with a single AudioNode you connect inline.
-//
-//   mic ──> NoiseGate.node ──> rest of audio graph
-//
-// All parameters are tunable from MAPPING.noiseGate in mapping.ts.
+// Hysteresis-aware: openDb opens the gate, closeDb must be undershot for
+// `holdSec` before the gate begins releasing.
 // ============================================================================
 
 import noiseGateUrl from './noise-gate-worklet.js?url';
 
 export interface NoiseGateOptions {
-  /** Open the gate when input level exceeds this (dBFS). */
-  thresholdDb?: number;
-  /** Gate-open ramp time (seconds). */
+  /** Open threshold in dBFS. Crossing above this snaps the gate open. */
+  openDb?: number;
+  /** Close threshold in dBFS. Must undershoot this for holdSec to release. */
+  closeDb?: number;
+  /** Hold time in seconds. Re-armed every time env crosses above closeDb. */
+  holdSec?: number;
+  /** Gate-open ramp time (sec). */
   attackSec?: number;
-  /** Gate-close ramp time (seconds). */
+  /** Gate-close ramp time (sec) once hold elapses. */
   releaseSec?: number;
-  /** Input envelope smoothing time (seconds). */
+  /** Input envelope smoothing time (sec). */
   envSmoothSec?: number;
 }
 
 const DEFAULTS: Required<NoiseGateOptions> = {
-  thresholdDb: -45,
+  openDb: -45,
+  closeDb: -55,
+  holdSec: 0.25,
   attackSec: 0.005,
-  releaseSec: 0.1,
+  releaseSec: 0.08,
   envSmoothSec: 0.020,
 };
 
@@ -40,7 +42,6 @@ export class NoiseGate {
     this.node = node;
   }
 
-  /** Async factory -- registers the processor module the first time. */
   static async create(ctx: AudioContext, opts: NoiseGateOptions = {}): Promise<NoiseGate> {
     const merged: Required<NoiseGateOptions> = { ...DEFAULTS, ...opts };
     await ctx.audioWorklet.addModule(noiseGateUrl);
@@ -52,7 +53,9 @@ export class NoiseGate {
       channelCountMode: 'explicit',
       channelInterpretation: 'discrete',
     });
-    node.parameters.get('threshold')!.value = merged.thresholdDb;
+    node.parameters.get('openDb')!.value = merged.openDb;
+    node.parameters.get('closeDb')!.value = merged.closeDb;
+    node.parameters.get('hold')!.value = merged.holdSec;
     node.parameters.get('attack')!.value = merged.attackSec;
     node.parameters.get('release')!.value = merged.releaseSec;
     node.parameters.get('envSmooth')!.value = merged.envSmoothSec;
@@ -60,7 +63,13 @@ export class NoiseGate {
     return new NoiseGate(ctx, node);
   }
 
-  setThresholdDb(db: number): void {
-    this.node.parameters.get('threshold')!.setTargetAtTime(db, this.ctx.currentTime, 0.01);
+  setOpenDb(db: number): void {
+    this.node.parameters.get('openDb')!.setTargetAtTime(db, this.ctx.currentTime, 0.01);
+  }
+  setCloseDb(db: number): void {
+    this.node.parameters.get('closeDb')!.setTargetAtTime(db, this.ctx.currentTime, 0.01);
+  }
+  setHoldSec(sec: number): void {
+    this.node.parameters.get('hold')!.setTargetAtTime(sec, this.ctx.currentTime, 0.01);
   }
 }

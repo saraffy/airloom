@@ -104,9 +104,12 @@ export const MAPPING: Mapping = {
     makeupGain: 1.3,              // post-compressor boost; pair with outputGain to taste
   },
   noiseGate: {
-    thresholdDb: -48,             // -45 was clipping soft speech; loosened slightly
+    // Open/close hysteresis so inter-syllable dips don't chop speech.
+    openDb: -45,                  // crossing above opens the gate immediately
+    closeDb: -55,                 // must drop below this for `holdSec`...
+    holdSec: 0.25,                // ...before release begins (bridges syllable pauses)
     attackSec: 0.005,
-    releaseSec: 0.1,
+    releaseSec: 0.08,
     envSmoothSec: 0.020,
   },
   handStickyFrames: 8,            // ~270ms bridge for tracker dropouts at 30fps

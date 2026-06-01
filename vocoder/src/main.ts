@@ -31,8 +31,11 @@ import {
   createHandStabilizer,
   createHandTracker,
   drawHand,
+  filterDelegateLogs,
   type HandStabilizer,
   type HandTracker,
+  type InitLogLine,
+  type StabilizedResult,
 } from './handTracking';
 import type { Category, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { CarrierSynth } from './audio/carrier';
@@ -97,17 +100,33 @@ let frameCount = 0;
 let lastFpsT = performance.now();
 let fps = 0;
 
-// MediaPipe inference timing. EMA over recent frames so the readout doesn't
-// flicker. Useful to confirm GPU vs CPU at a glance: GPU is typically
-// <15ms; CPU fallback is 30-100ms.
+// MediaPipe inference timing. EMA over recent frames. Now reported as a
+// raw metric only -- NOT as a delegate guess. Heavy-vs-light-frame
+// variation (palm-detection vs landmark model) makes per-frame ms a bad
+// signal for which delegate MediaPipe actually loaded.
 let avgInferenceMs = 0;
 const INF_EMA_ALPHA = 0.1;
 
-// GPU availability flag. We pass `delegate: 'GPU'` to HandLandmarker, but
-// MediaPipe will silently fall back to CPU if WebGL isn't available --
-// best heuristic for "is GPU actually working" is to check both this flag
-// AND avgInferenceMs (<15ms means GPU is in use).
+// WebGL availability -- a precondition for the GPU delegate. MediaPipe
+// silently falls back to CPU when WebGL is unavailable; that fallback
+// (or a separate "GPU init failed" event) shows up in the init log.
 const gpuAvailable: boolean = checkGpuAvailable();
+
+// Captured at startup. Surfaces both the delegate we asked for AND the
+// MediaPipe console output during model load so a silent CPU fallback is
+// visible in the UI.
+let requestedDelegate: 'GPU' | 'CPU' | null = null;
+let initLog: InitLogLine[] = [];
+let filteredInitLog: InitLogLine[] = [];
+
+// Cached stabilized result from the last detection frame. drawDetections
+// runs every rAF tick using this, so the skeleton stays visible between
+// video frames AND on dropped-detection frames (where the stabilizer
+// re-injects the cached hand).
+let lastStable: StabilizedResult | null = null;
+// Tracks the transition between "fresh detection" and "actively bridging"
+// so we can console.log when stabilizer engagement begins/ends.
+let bridgingActive = false;
 
 function checkGpuAvailable(): boolean {
   try {
@@ -161,6 +180,21 @@ async function start(): Promise<void> {
     setStatus('Loading hand-landmark model…');
     tracker = await createHandTracker();
     stabilizer = createHandStabilizer(MAPPING.handStickyFrames);
+
+    // Surface the ground-truth delegate + any MediaPipe init warnings
+    // (especially "GPU init failed" / "falling back to CPU" style lines).
+    requestedDelegate = tracker.requestedDelegate;
+    initLog = tracker.initLog;
+    filteredInitLog = filterDelegateLogs(initLog);
+    console.log(
+      `[vocoder] HandLandmarker requestedDelegate=${requestedDelegate}, ` +
+        `gpuAvailable=${gpuAvailable}, initLog lines=${initLog.length}, ` +
+        `delegate-related lines=${filteredInitLog.length}`,
+    );
+    if (filteredInitLog.length > 0) {
+      console.log('[vocoder] MediaPipe init log (delegate/GPU/WebGL):');
+      for (const l of filteredInitLog) console.log(`  [${l.level}] ${l.msg}`);
+    }
 
     // --- Audio engine -----------------------------------------------------
     audioCtx = new AudioContext();
@@ -224,17 +258,18 @@ function describeError(err: unknown): string {
 function renderLoop(): void {
   if (!running || !tracker || !stabilizer) return;
 
+  // Always draw the current video frame.
   ctx.save();
   ctx.scale(-1, 1);
   ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
   ctx.restore();
 
+  // Detect + reconcile + drive audio ONLY when the video frame has
+  // advanced. HandLandmarker requires monotonically-increasing timestamps
+  // in VIDEO mode, and there's no point running inference on the same
+  // pixels twice. (rAF typically runs at 60Hz; webcam video is ~30Hz.)
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
-    // detect() is called AT MOST once per video frame (gated by the
-    // currentTime change above). Timestamp is performance.now() in ms,
-    // monotonic across the page lifetime -- this satisfies HandLandmarker's
-    // VIDEO-mode contract that timestamps strictly increase.
     const t = performance.now();
     const raw = tracker.detect(video, t);
     const inferenceMs = performance.now() - t;
@@ -243,13 +278,48 @@ function renderLoop(): void {
         ? inferenceMs
         : avgInferenceMs * (1 - INF_EMA_ALPHA) + inferenceMs * INF_EMA_ALPHA;
 
-    // Bridge brief tracker dropouts (cached landmarks for `handStickyFrames`
-    // frames). This stabilises both the visible skeleton AND the audio gate.
     const stable = stabilizer.reconcile(raw);
+    lastStable = stable;
     lastAges = stable.ages;
-    drawDetections(stable.landmarks, stable.handedness, stable.ages);
+
+    // Log when the stabilizer transitions in/out of bridging. This is the
+    // direct evidence that the bridge IS engaging on dropped frames.
+    const bridging = stable.ages.some((a) => a > 0);
+    const rawHadHands = raw.landmarks.length > 0;
+    if (bridging && !bridgingActive) {
+      console.log(
+        `[stabilizer] BRIDGE START -- raw returned ${raw.landmarks.length} hand(s); ` +
+          `replaying cached hand(s) at ages=[${stable.ages.join(', ')}]`,
+      );
+      bridgingActive = true;
+    } else if (!bridging && bridgingActive) {
+      console.log(`[stabilizer] BRIDGE END -- fresh detection resumed`);
+      bridgingActive = false;
+    } else if (bridging && !rawHadHands) {
+      // Continuing bridge with raw returning no hands -- log per-N frames.
+      if (stable.ages[0] !== undefined && stable.ages[0] % 4 === 0) {
+        console.log(`[stabilizer] bridging, age=[${stable.ages.join(', ')}]`);
+      }
+    }
+
+    // Audio + debug update at video-frame rate, NOT rAF rate. Pitch is
+    // automatically held on bridged frames because the stabilizer
+    // re-emits the same cached landmarks -- extractFeatures yields the
+    // same wristY -> same MIDI -> same Hz, and during full hand loss
+    // (after stabilizer expires) driveAudio's `rightIdx < 0` branch
+    // explicitly skips setFrequency.
     driveAudio(stable.landmarks, stable.handedness);
     updateDebug(stable.landmarks, stable.handedness);
+  }
+
+  // Drawing the skeleton runs EVERY rAF tick using the cached stable
+  // result. Without this, ticks between video frames re-paint the video
+  // over the canvas without re-drawing landmarks, producing a visible
+  // 30 Hz strobe; and any frame where reconcile bridged a hand would
+  // also render no skeleton because we ran drawDetections only inside
+  // the conditional above.
+  if (lastStable) {
+    drawDetections(lastStable.landmarks, lastStable.handedness, lastStable.ages);
   }
 
   frameCount += 1;
@@ -382,12 +452,6 @@ function updateDebug(
   handedness: Category[][],
 ): void {
   const inferenceFps = avgInferenceMs > 0 ? Math.round(1000 / avgInferenceMs) : 0;
-  const delegate =
-    avgInferenceMs > 0 && avgInferenceMs < 20
-      ? 'GPU'
-      : avgInferenceMs > 0
-        ? 'CPU? (slow)'
-        : 'unknown';
 
   // Hangover indicator: when the stabilized hand is missing but the gate
   // is still open, we're inside the trackingHoldMs window. Surface this
@@ -395,9 +459,19 @@ function updateDebug(
   const hangoverMs =
     trackingLostSinceT !== null ? performance.now() - trackingLostSinceT : 0;
 
+  // How many hands in the current frame came from the stabilizer cache
+  // (age > 0) vs fresh from MediaPipe (age == 0). This is the direct
+  // signal that bridging is engaging.
+  const bridgedNow = lastAges.filter((a) => a > 0).length;
+  const freshNow = lastAges.filter((a) => a === 0).length;
+
   const lines: string[] = [
-    `fps: ${fps.toFixed(1)}    hands: ${hands.length}`,
-    `inference: ${avgInferenceMs.toFixed(1)}ms (~${inferenceFps} fps, delegate=${delegate}, gpu-available=${gpuAvailable})`,
+    `fps: ${fps.toFixed(1)}    hands: ${hands.length} (fresh=${freshNow} bridged=${bridgedNow})`,
+    // Show the REAL delegate (what we asked for), the WebGL availability,
+    // and a count of MediaPipe init-log lines mentioning GPU/CPU/delegate
+    // for click-through to console. The timing heuristic is gone.
+    `delegate-requested: ${requestedDelegate ?? '?'}  webgl-available: ${gpuAvailable}  init-log: ${initLog.length} lines (${filteredInitLog.length} delegate-related, see console)`,
+    `inference: ${avgInferenceMs.toFixed(1)}ms (~${inferenceFps} fps)`,
     `scale: ${MAPPING.scale.name} (root ${MAPPING.scale.root})`,
   ];
 
@@ -408,7 +482,10 @@ function updateDebug(
     );
   }
   if (noiseGate) {
-    lines.push(`noiseGate: threshold ${MAPPING.noiseGate.thresholdDb ?? -45} dBFS`);
+    const ng = MAPPING.noiseGate;
+    lines.push(
+      `noiseGate: open ${ng.openDb ?? -45}dB / close ${ng.closeDb ?? -55}dB / hold ${((ng.holdSec ?? 0.25) * 1000).toFixed(0)}ms`,
+    );
   }
   if (hangoverMs > 0) {
     lines.push(

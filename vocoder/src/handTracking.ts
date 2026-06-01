@@ -32,42 +32,124 @@ import {
 //   const WASM_BASE = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
 // (Avoid 0.10.22 on jsDelivr -- the wasm/ subfolder is not published there.)
 const WASM_BASE = '/wasm';
+// Float16 GPU-optimized model. `latest` resolves to the newest published
+// version, which is what MediaPipe recommends for GPU inference.
 const MODEL_URL =
-  'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+  'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task';
+
+export type Delegate = 'GPU' | 'CPU';
+
+export interface InitLogLine {
+  level: 'log' | 'info' | 'warn' | 'error';
+  msg: string;
+}
 
 export interface HandTracker {
   detect(video: HTMLVideoElement, timestampMs: number): HandLandmarkerResult;
   close(): void;
+  /** The delegate string we passed to baseOptions -- ground truth, not a guess. */
+  readonly requestedDelegate: Delegate;
+  /**
+   * Console output that MediaPipe (and Emscripten) emitted during model load.
+   * Any GPU init failure / silent CPU fallback typically shows up here.
+   */
+  readonly initLog: InitLogLine[];
+}
+
+interface ConsoleHookHandle {
+  orig: {
+    log: typeof console.log;
+    info: typeof console.info;
+    warn: typeof console.warn;
+    error: typeof console.error;
+  };
+}
+
+function installConsoleCapture(into: InitLogLine[]): ConsoleHookHandle {
+  const orig = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error,
+  };
+  const stringify = (args: unknown[]) =>
+    args
+      .map((a) => {
+        if (typeof a === 'string') return a;
+        if (a instanceof Error) return a.stack ?? a.message;
+        try {
+          return JSON.stringify(a);
+        } catch {
+          return String(a);
+        }
+      })
+      .join(' ');
+  const make =
+    (level: InitLogLine['level'], passThrough: (...a: unknown[]) => void) =>
+    (...args: unknown[]) => {
+      into.push({ level, msg: stringify(args) });
+      passThrough.apply(console, args);
+    };
+  console.log = make('log', orig.log) as typeof console.log;
+  console.info = make('info', orig.info) as typeof console.info;
+  console.warn = make('warn', orig.warn) as typeof console.warn;
+  console.error = make('error', orig.error) as typeof console.error;
+  return { orig };
+}
+
+function uninstallConsoleCapture(h: ConsoleHookHandle): void {
+  console.log = h.orig.log;
+  console.info = h.orig.info;
+  console.warn = h.orig.warn;
+  console.error = h.orig.error;
 }
 
 export async function createHandTracker(): Promise<HandTracker> {
-  const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
-  const landmarker = await HandLandmarker.createFromOptions(fileset, {
-    baseOptions: {
-      modelAssetPath: MODEL_URL,
-      // GPU is faster but may fall back to CPU on some browsers/devices.
-      delegate: 'GPU',
-    },
-    runningMode: 'VIDEO',
-    numHands: 2,
-    // Confidence thresholds tuned for live performance:
-    //   - Detection stays at 0.5 so we don't get spurious hands from noise.
-    //   - Presence / tracking lowered to 0.3 so brief confidence dips
-    //     (lighting changes, partial occlusion) don't drop the hand entirely.
-    //     The hand stabilizer below also bridges the rare full dropouts.
-    minHandDetectionConfidence: 0.5,
-    minHandPresenceConfidence: 0.3,
-    minTrackingConfidence: 0.3,
-  });
+  const requestedDelegate: Delegate = 'GPU';
+  const initLog: InitLogLine[] = [];
+  const hook = installConsoleCapture(initLog);
 
-  return {
-    detect(video, timestampMs) {
-      return landmarker.detectForVideo(video, timestampMs);
-    },
-    close() {
-      landmarker.close();
-    },
-  };
+  try {
+    const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
+    const landmarker = await HandLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: MODEL_URL,
+        // GROUND TRUTH: this is the delegate we ask for. MediaPipe may
+        // log a warning and fall back to CPU if GPU init fails -- that
+        // warning will appear in `initLog`. The previous timing-based
+        // delegate guess was unreliable and has been removed.
+        delegate: requestedDelegate,
+      },
+      runningMode: 'VIDEO',
+      numHands: 2,
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.3,
+      minTrackingConfidence: 0.3,
+    });
+
+    return {
+      requestedDelegate,
+      initLog,
+      detect(video, timestampMs) {
+        return landmarker.detectForVideo(video, timestampMs);
+      },
+      close() {
+        landmarker.close();
+      },
+    };
+  } finally {
+    uninstallConsoleCapture(hook);
+  }
+}
+
+/**
+ * Filter the captured init log for lines that mention GPU/CPU/delegate/
+ * WebGL/fallback. These are the lines that tell you whether MediaPipe
+ * actually got the GPU delegate or fell back silently.
+ */
+export function filterDelegateLogs(log: InitLogLine[]): InitLogLine[] {
+  const pattern = /(gpu|cpu|delegate|webgl|xnnpack|fallback|opengl|gl_|gles)/i;
+  return log.filter((l) => pattern.test(l.msg));
 }
 
 // ----------------------------------------------------------------------------
