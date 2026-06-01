@@ -9,7 +9,7 @@
 //   carrier (synth) ──> BPF[b] ──> GainNode[b].gain ◄──────────┘
 //                                       │
 //                                       └──> internalSum ──> gateGain ──> output
-//   modulator (mic) ──> dryGain ──────────────^                ^
+//   dryMicIn (gated mic) ──> dryGain ─────────^                ^
 //                                                              │
 //                                          master gate (mute/unmute), driven
 //                                          by setGate(open) -- one switch
@@ -29,6 +29,17 @@
 //     a single broadband level. By bandpassing the carrier the same way as
 //     the modulator, each band scales only the carrier energy in *that*
 //     spectral region -- which is what makes the carrier "speak".
+//
+// Why two mic inputs (modulatorIn + dryMicIn)?
+//   - The BAND path is latency-critical (it's the perceived monitoring
+//     delay). Routing the mic through an AudioWorklet noise gate before
+//     hitting modulatorIn costs ~128 samples ≈ 2.7ms at 48k. Most of that
+//     work is wasted on the band path: each per-band envelope follower
+//     already attenuates the carrier to near-zero on low-level inputs.
+//   - The DRY mic blend (~12%), however, would let room hiss through
+//     un-gated. So we put the noise gate ONLY on dryMicIn and feed
+//     modulatorIn directly from the raw mic. One worklet hop saved on
+//     the path you actually hear.
 // ============================================================================
 
 // Import the worklet source as a URL. Vite serves the .js file in dev and
@@ -111,8 +122,19 @@ export function logSpacedBands(lowHz: number, highHz: number, n: number): number
 
 export class Vocoder {
   readonly ctx: AudioContext;
-  /** Connect the modulator (e.g. mic) signal here. */
+  /**
+   * Modulator input -- drives the BAND path (BPF → envelope follower → VCA).
+   * Keep this on the lowest-latency available source (e.g. raw mic with no
+   * pre-worklet) since this is the perceived-latency-critical path.
+   */
   readonly modulatorIn: GainNode;
+  /**
+   * Dry-mic input -- drives the small parallel dry-mic blend that lands in
+   * the vocoded sum. Separated from modulatorIn so callers can put a noise
+   * gate / processing on ONLY this path without burdening the band path
+   * with an extra worklet hop.
+   */
+  readonly dryMicIn: GainNode;
   /** Connect the carrier (e.g. synth) signal here. */
   readonly carrierIn: GainNode;
   /** Final vocoded output. Connect this to destination or master FX chain. */
@@ -140,6 +162,8 @@ export class Vocoder {
 
     this.modulatorIn = ctx.createGain();
     this.modulatorIn.gain.value = 1;
+    this.dryMicIn = ctx.createGain();
+    this.dryMicIn.gain.value = 1;
     this.carrierIn = ctx.createGain();
     this.carrierIn.gain.value = 1;
 
@@ -190,10 +214,13 @@ export class Vocoder {
     this.output.gain.value = 1;
     this.limiter.connect(this.output);
 
-    // Dry mic blend joins the internal sum (so it gets gated too).
+    // Dry mic blend joins the internal sum (so it gets gated by the
+    // master gate too). It pulls from dryMicIn, NOT modulatorIn -- this
+    // lets callers route a noise-gated mic to dryMicIn while feeding the
+    // band path with the raw mic for minimum latency.
     this.dryGain = ctx.createGain();
     this.dryGain.gain.value = opts.dryMix;
-    this.modulatorIn.connect(this.dryGain);
+    this.dryMicIn.connect(this.dryGain);
     this.dryGain.connect(this.internalSum);
 
     this.bandFreqs = logSpacedBands(opts.lowHz, opts.highHz, opts.bands);

@@ -426,20 +426,32 @@ async function start(): Promise<void> {
     smoothLeftOpenness = new OneEuroFilter(MAPPING.smoothing);
     smoothHandDistance = new OneEuroFilter(MAPPING.smoothing);
 
-    // Audio graph (with toggleable noise-gate bypass):
+    // Audio graph -- latency-optimised (Phase 5+ post-step-3):
     //
-    //                        ┌─► noiseGate ─► gatedPath (gain=1) ─┐
-    //   mic -> MediaStream ──┤                                     ├─► vocoder.modulatorIn
-    //                        └─► bypassPath (gain=0) ─────────────┘
-    //                        carrier -> vocoder.carrierIn
-    //                        vocoder.output -> destination
+    //   mic ─┬────────────────────────────────► vocoder.modulatorIn   (BAND path, raw, no worklet hop)
+    //        │
+    //        ├─► noiseGate ─► gatedPath (gain=1) ─┐
+    //        │                                    ├─► vocoder.dryMicIn (DRY blend, gated)
+    //        └─► bypassPath (gain=0) ─────────────┘
     //
-    // The two parallel paths sum into the vocoder modulator input. By
-    // default the gated path is active (gain=1) and the bypass is muted
-    // (gain=0). Pressing 'G' crossfades between them so you can A/B
-    // whether the gate is the cause of audible chopping.
+    //   carrier ─┬─► vocoder.carrierIn   (vocoding bands)
+    //            └─► masterFx.dryCarrierIn (wet/dry crossfade target)
+    //   vocoder.output ─► masterFx.vocodedIn
+    //   masterFx.output ─► destination
+    //
+    // Why split: the BAND path drives the audible vocoded carrier and is
+    // perceived-latency-critical. Routing it through the noise gate
+    // worklet costs ~2.7ms (128 samples @ 48k) for little benefit -- each
+    // per-band envelope follower already attenuates the carrier on low
+    // inputs. The dry mic blend, however, would leak un-gated room
+    // hiss, so the gate stays on THAT path. Bypass toggle (G key)
+    // affects dry path only.
     micSource = audioCtx.createMediaStreamSource(micStream);
 
+    // Band path: mic direct to modulator -- saves one worklet hop.
+    micSource.connect(vocoder.modulatorIn);
+
+    // Dry-mic path: noise gate (or bypass) routed to vocoder.dryMicIn.
     gatedPath = audioCtx.createGain();
     gatedPath.gain.value = 1;
     bypassPath = audioCtx.createGain();
@@ -449,8 +461,8 @@ async function start(): Promise<void> {
     noiseGate.node.connect(gatedPath);
     micSource.connect(bypassPath);
 
-    gatedPath.connect(vocoder.modulatorIn);
-    bypassPath.connect(vocoder.modulatorIn);
+    gatedPath.connect(vocoder.dryMicIn);
+    bypassPath.connect(vocoder.dryMicIn);
 
     // Carrier feeds BOTH the vocoder (for shaping) AND the MasterFX dry
     // path (for the openness-controlled wet/dry blend). These are parallel
