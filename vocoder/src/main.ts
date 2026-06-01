@@ -70,6 +70,12 @@ let vocoder: Vocoder | null = null;
 let noiseGate: NoiseGate | null = null;
 let micStream: MediaStream | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
+// Two parallel gain switches between the mic and the vocoder modulator
+// so a single key press can A/B the noise gate without touching anything
+// else in the graph. See installNoiseGateToggle() below.
+let gatedPath: GainNode | null = null;
+let bypassPath: GainNode | null = null;
+let noiseGateBypassed = false;
 
 // Master gate state (right hand visible + pinch open). When false,
 // vocoder.setGate(false) is in effect and output is silent.
@@ -128,6 +134,35 @@ let lastStable: StabilizedResult | null = null;
 // so we can console.log when stabilizer engagement begins/ends.
 let bridgingActive = false;
 
+// ---------------------------------------------------------------------------
+// Noise-gate bypass toggle (press G)
+// ---------------------------------------------------------------------------
+// Diagnostic switch. The noise gate node always runs (cheap), but when
+// "bypassed" its output is faded out and the raw mic is faded in, so the
+// vocoder sees unprocessed mic. Useful to confirm whether audible chopping
+// is caused by the gate or by something downstream.
+function installNoiseGateToggle(): void {
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'g' && e.key !== 'G') return;
+    if (!audioCtx || !gatedPath || !bypassPath) return;
+    // Ignore key events from text inputs (none today, but be safe for later).
+    const target = e.target as HTMLElement | null;
+    if (target && /input|textarea|select/i.test(target.tagName ?? '')) return;
+
+    noiseGateBypassed = !noiseGateBypassed;
+    const t = audioCtx.currentTime;
+    const gateTarget = noiseGateBypassed ? 0 : 1;
+    const bypTarget = noiseGateBypassed ? 1 : 0;
+    // Short crossfade -- avoids click and lets you hear the transition.
+    gatedPath.gain.setTargetAtTime(gateTarget, t, 0.01);
+    bypassPath.gain.setTargetAtTime(bypTarget, t, 0.01);
+
+    const stateText = noiseGateBypassed ? 'BYPASSED' : 'enabled';
+    console.log(`[vocoder] noise gate ${stateText}`);
+    setStatus(`Noise gate ${stateText} (press G to toggle)`, noiseGateBypassed ? 'info' : 'ok');
+  });
+}
+
 function checkGpuAvailable(): boolean {
   try {
     const c = document.createElement('canvas');
@@ -161,9 +196,15 @@ async function start(): Promise<void> {
         height: { ideal: 480 },
         facingMode: 'user',
       },
+      // ALL voice-call processing OFF:
+      //   - echoCancellation, noiseSuppression and autoGainControl each add
+      //     buffered processing (tens of ms of input latency) and smear the
+      //     modulator. Since the user is on headphones EC isn't needed, and
+      //     NS in particular interacts badly with the vocoder's envelope
+      //     follower (it pre-gates voice transients we want to capture).
       audio: {
-        echoCancellation: true,
-        noiseSuppression: false, // we want the raw voice for the vocoder
+        echoCancellation: false,
+        noiseSuppression: false,
         autoGainControl: false,
       },
     });
@@ -197,7 +238,11 @@ async function start(): Promise<void> {
     }
 
     // --- Audio engine -----------------------------------------------------
-    audioCtx = new AudioContext();
+    // `latencyHint: 'interactive'` asks the browser for the lowest-latency
+    // buffer size it can offer. We deliberately DO NOT pin sampleRate --
+    // letting the context match the input device avoids a resample stage
+    // between MediaStreamSource and the graph.
+    audioCtx = new AudioContext({ latencyHint: 'interactive' });
     await audioCtx.resume();
 
     carrier = new CarrierSynth(audioCtx);
@@ -211,17 +256,48 @@ async function start(): Promise<void> {
     setStatus('Loading noise gate…');
     noiseGate = await NoiseGate.create(audioCtx, MAPPING.noiseGate);
 
-    // Audio graph:  mic -> noiseGate -> vocoder.modulatorIn
-    //               carrier -> vocoder.carrierIn
-    //               vocoder.output -> destination
+    // Audio graph (with toggleable noise-gate bypass):
+    //
+    //                        ┌─► noiseGate ─► gatedPath (gain=1) ─┐
+    //   mic -> MediaStream ──┤                                     ├─► vocoder.modulatorIn
+    //                        └─► bypassPath (gain=0) ─────────────┘
+    //                        carrier -> vocoder.carrierIn
+    //                        vocoder.output -> destination
+    //
+    // The two parallel paths sum into the vocoder modulator input. By
+    // default the gated path is active (gain=1) and the bypass is muted
+    // (gain=0). Pressing 'G' crossfades between them so you can A/B
+    // whether the gate is the cause of audible chopping.
     micSource = audioCtx.createMediaStreamSource(micStream);
+
+    gatedPath = audioCtx.createGain();
+    gatedPath.gain.value = 1;
+    bypassPath = audioCtx.createGain();
+    bypassPath.gain.value = 0;
+
     micSource.connect(noiseGate.node);
-    noiseGate.node.connect(vocoder.modulatorIn);
+    noiseGate.node.connect(gatedPath);
+    micSource.connect(bypassPath);
+
+    gatedPath.connect(vocoder.modulatorIn);
+    bypassPath.connect(vocoder.modulatorIn);
+
     carrier.output.connect(vocoder.carrierIn);
     vocoder.output.connect(audioCtx.destination);
 
+    installNoiseGateToggle();
+
+    // Surface the actual platform latency once everything is wired.
+    const base = audioCtx.baseLatency * 1000;
+    const out = (audioCtx.outputLatency ?? 0) * 1000;
+    console.log(
+      `[vocoder] audio context: sampleRate=${audioCtx.sampleRate}Hz ` +
+        `baseLatency=${base.toFixed(2)}ms outputLatency=${out.toFixed(2)}ms ` +
+        `total=${(base + out).toFixed(2)}ms latencyHint=interactive`,
+    );
+
     running = true;
-    setStatus('Ready. Headphones recommended. Hand up + unpinch + voice = robot.', 'ok');
+    setStatus('Ready. Headphones recommended. Press G to toggle noise gate bypass.', 'ok');
     requestAnimationFrame(renderLoop);
   } catch (err) {
     console.error('Failed to start:', err);
@@ -465,6 +541,17 @@ function updateDebug(
   const bridgedNow = lastAges.filter((a) => a > 0).length;
   const freshNow = lastAges.filter((a) => a === 0).length;
 
+  // Live audio latency. baseLatency is the input buffer (browser-side);
+  // outputLatency (when implemented) is the output buffer. Sum is the
+  // round-trip monitoring delay floor -- the rest is per-node processing
+  // (noise gate + envelope follower add one quantum each ~ 2.7ms at 48k).
+  let latencyLine = '';
+  if (audioCtx) {
+    const baseMs = audioCtx.baseLatency * 1000;
+    const outMs = (audioCtx.outputLatency ?? 0) * 1000;
+    latencyLine = `audio: sr=${audioCtx.sampleRate}Hz  base=${baseMs.toFixed(1)}ms  output=${outMs.toFixed(1)}ms  total=${(baseMs + outMs).toFixed(1)}ms`;
+  }
+
   const lines: string[] = [
     `fps: ${fps.toFixed(1)}    hands: ${hands.length} (fresh=${freshNow} bridged=${bridgedNow})`,
     // Show the REAL delegate (what we asked for), the WebGL availability,
@@ -472,6 +559,7 @@ function updateDebug(
     // for click-through to console. The timing heuristic is gone.
     `delegate-requested: ${requestedDelegate ?? '?'}  webgl-available: ${gpuAvailable}  init-log: ${initLog.length} lines (${filteredInitLog.length} delegate-related, see console)`,
     `inference: ${avgInferenceMs.toFixed(1)}ms (~${inferenceFps} fps)`,
+    latencyLine,
     `scale: ${MAPPING.scale.name} (root ${MAPPING.scale.root})`,
   ];
 
@@ -484,7 +572,7 @@ function updateDebug(
   if (noiseGate) {
     const ng = MAPPING.noiseGate;
     lines.push(
-      `noiseGate: open ${ng.openDb ?? -45}dB / close ${ng.closeDb ?? -55}dB / hold ${((ng.holdSec ?? 0.25) * 1000).toFixed(0)}ms`,
+      `noiseGate: open ${ng.openDb ?? -45}dB / close ${ng.closeDb ?? -60}dB / hold ${((ng.holdSec ?? 0.4) * 1000).toFixed(0)}ms  ${noiseGateBypassed ? '(BYPASSED -- press G)' : '(active -- press G to bypass)'}`,
     );
   }
   if (hangoverMs > 0) {

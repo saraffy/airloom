@@ -106,8 +106,8 @@ export const MAPPING: Mapping = {
   noiseGate: {
     // Open/close hysteresis so inter-syllable dips don't chop speech.
     openDb: -45,                  // crossing above opens the gate immediately
-    closeDb: -55,                 // must drop below this for `holdSec`...
-    holdSec: 0.25,                // ...before release begins (bridges syllable pauses)
+    closeDb: -60,                 // looser close: sustained singing dips don't trigger
+    holdSec: 0.4,                 // longer hold: easily bridges normal syllable pauses
     attackSec: 0.005,
     releaseSec: 0.08,
     envSmoothSec: 0.020,
