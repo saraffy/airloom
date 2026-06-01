@@ -75,33 +75,23 @@ export interface Mapping {
    */
   handStickyFrames: number;
   /**
-   * Chord stacking from the left hand's extended-finger count.
-   *   1 finger  -> 1 voice  (mono root)
-   *   2..N      -> N voices stacked in "thirds" (every other scale degree)
-   * fingerOpenRatio / fingerCloseRatio give per-finger hysteresis so the
-   * count doesn't chatter at extension boundaries.
+   * Auto-triad + density mapping from left-hand openness.
+   * The carrier always builds a diatonic 3-note triad on the right-hand
+   * root note (root + scale 3rd + scale 5th). Openness then continuously
+   * fades the two upper voices (third + fifth) in by gain:
+   *   fist (low openness)   -> density 0 (root only, clean melody line)
+   *   open palm (high)      -> density 1 (full triad)
    */
-  chord: {
-    /** Max simultaneous voices. */
-    maxVoices: number;
-    /** Per-finger ratio above which a finger flips to "extended". */
-    fingerOpenRatio: number;
-    /** Per-finger ratio below which an extended finger flips to "curled". */
-    fingerCloseRatio: number;
-    /** Same pair for the thumb (geometrically different from other fingers). */
-    thumbOpenRatio: number;
-    thumbCloseRatio: number;
-  };
-  /**
-   * Left-hand openness -> wet/dry mix. Linear map: openness in
-   * [opennessMin, opennessMax] linearly maps to wet in [wetMin, wetMax].
-   * wet = 1 -> full vocoded; wet = 0 -> full dry carrier.
-   */
-  wetDry: {
+  density: {
+    /** Openness value treated as a fist (density = 0). */
     opennessMin: number;
+    /** Openness value treated as an open palm (density = 1). */
     opennessMax: number;
-    wetMin: number;
-    wetMax: number;
+    /**
+     * Total number of voices in the auto-triad. 3 = root + third + fifth,
+     * the spec default. CarrierSynth is instantiated with this many voices.
+     */
+    voiceCount: number;
   };
   /**
    * Two-hand horizontal distance -> reverb send level. Distance is the
@@ -165,21 +155,10 @@ export const MAPPING: Mapping = {
     envSmoothSec: 0.020,
   },
   handStickyFrames: 8,            // ~270ms bridge for tracker dropouts at 30fps
-  chord: {
-    maxVoices: 5,                 // 1=mono, 5=open pentad
-    // Per-finger ratios -- empirical, calibrated against typical hand poses.
-    fingerOpenRatio: 0.85,        // tip > 85% palm-length from MCP -> extended
-    fingerCloseRatio: 0.65,
-    thumbOpenRatio: 0.55,         // thumb's geometry is different
-    thumbCloseRatio: 0.40,
-  },
-  wetDry: {
-    // Openness range covers fist (≈ 1.0) through fully-spread palm (≈ 3.0).
-    // Mapping is INVERTED: fist = full wet (vocoded), open = drier carrier.
-    opennessMin: 1.0,
-    opennessMax: 3.0,
-    wetMin: 0.35,                 // open palm: a bit of dry carrier comes through
-    wetMax: 1.0,                  // fist: full vocoded
+  density: {
+    opennessMin: 1.0,             // fist (carrier plays root only)
+    opennessMax: 3.0,             // open palm (full triad audible)
+    voiceCount: 3,                // root + scale 3rd + scale 5th
   },
   reverbSend: {
     // Horizontal hand distance: hands together ≈ 0.05, arms wide ≈ 0.7.
@@ -190,7 +169,9 @@ export const MAPPING: Mapping = {
   },
   masterFx: {
     dryCarrierTrim: 0.3,
-    initialWet: 1.0,
+    initialWet: 1.0,              // FIXED wet/dry (left hand no longer drives this)
+                                  // 1.0 = fully wet (pure vocoder character)
+                                  // Lower toward 0 for more dry carrier in the mix
     reverbDurationSec: 1.6,       // small-medium room tail
     reverbDecay: 2.5,
     reverbReturnGain: 0.55,

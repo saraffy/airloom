@@ -122,18 +122,11 @@ let smoothRightWristY: OneEuroFilter | null = null;
 let smoothLeftOpenness: OneEuroFilter | null = null;
 let smoothHandDistance: OneEuroFilter | null = null;
 
-// Per-finger extension hysteresis (boolean state per finger, updated each
-// time the left hand is seen). The integer chord size is the count of
-// `true` entries plus a min of 1 (so a fist still plays mono).
-let fingerExtended = {
-  thumb: false,
-  index: false,
-  middle: false,
-  ring: false,
-  pinky: false,
-};
-let lastChordSize = 1;
-let lastWetLevel = 1;
+// Left-hand-openness-driven density (0..1). Carrier always plays the full
+// triad voicing; this value continuously fades the two UPPER voices
+// (third + fifth) in/out. 0 = root only (clean melody line),
+// 1 = full triad. Smoothed by the one-euro filter so it doesn't zipper.
+let lastDensity = 0;
 let lastReverbSend = 0;
 // Cached features per side for debug + audio.
 let lastLeftFeatures: HandFeatures | null = null;
@@ -302,21 +295,22 @@ function updateMeters(): void {
     meterNote.textContent = '—';
   }
 
-  // Chord
+  // Chord (always full 3-note triad on the current root)
   if (lastSnappedMidi !== null) {
-    const chordMidis = chordFromScale(
+    const triad = chordFromScale(
       lastSnappedMidi,
-      lastChordSize,
+      MAPPING.density.voiceCount,
       currentScale(),
       MAPPING.scale.root,
     );
-    meterChord.textContent = `${lastChordSize}v · ${chordMidis.map(midiName).join(' ')}`;
+    meterChord.textContent = triad.map(midiName).join(' ');
   } else {
     meterChord.textContent = '—';
   }
 
-  // Wet bar
-  meterWet.style.width = `${Math.round(lastWetLevel * 100)}%`;
+  // Density bar (was Wet; left-hand openness controls density now,
+  // wet/dry is fixed at MAPPING.masterFx.initialWet).
+  meterWet.style.width = `${Math.round(lastDensity * 100)}%`;
   // Reverb bar
   meterReverb.style.width = `${Math.round(lastReverbSend * 100)}%`;
 }
@@ -422,9 +416,10 @@ async function start(): Promise<void> {
     }
     await audioCtx.resume();
 
-    // Polyphonic carrier (max 5 voices). Voices start gated off; the first
-    // driveAudio() with a visible right hand opens voice 0 via setVoices().
-    carrier = new CarrierSynth(audioCtx, { maxVoices: MAPPING.chord.maxVoices });
+    // Polyphonic carrier. With auto-triad we only need 3 voices (root +
+    // scale 3rd + scale 5th). All 3 are always assigned a frequency; the
+    // density value fades the upper two voices' levels in/out smoothly.
+    carrier = new CarrierSynth(audioCtx, { maxVoices: MAPPING.density.voiceCount });
 
     setStatus('Loading vocoder…');
     vocoder = await Vocoder.create(audioCtx, MAPPING.vocoder);
@@ -648,20 +643,6 @@ function findHand(handedness: Category[][], label: 'Right' | 'Left'): number {
   return -1;
 }
 
-/**
- * Update one finger's extension flag using per-finger hysteresis. Returns
- * the new state.
- */
-function updateFingerExtension(
-  prev: boolean,
-  ratio: number,
-  openThreshold: number,
-  closeThreshold: number,
-): boolean {
-  if (prev) return ratio >= closeThreshold;
-  return ratio >= openThreshold;
-}
-
 function setMasterMode(target: MasterMode): void {
   if (!masterFx || masterMode === target) return;
   masterFx.setMode(target);
@@ -679,51 +660,24 @@ function driveAudio(
   const leftIdx = findHand(handedness, 'Left');
 
   // -----------------------------------------------------------------------
-  // LEFT HAND: chord size (via finger-count hysteresis) + wet/dry (openness)
+  // LEFT HAND: openness -> harmonic density (root-only ↔ full triad).
+  // No finger-counting anymore. The carrier always plays a 3-note diatonic
+  // triad on the right-hand root note; openness continuously crossfades
+  // the two upper voices (third + fifth) in/out via per-voice gain.
   // -----------------------------------------------------------------------
-  let chordSize = lastChordSize; // hold last value if left hand missing
   if (leftIdx >= 0) {
     const lf = extractFeatures(hands[leftIdx]!);
     lastLeftFeatures = lf;
 
-    const c = MAPPING.chord;
-    fingerExtended.thumb = updateFingerExtension(
-      fingerExtended.thumb, lf.fingerRatios.thumb, c.thumbOpenRatio, c.thumbCloseRatio,
-    );
-    fingerExtended.index = updateFingerExtension(
-      fingerExtended.index, lf.fingerRatios.index, c.fingerOpenRatio, c.fingerCloseRatio,
-    );
-    fingerExtended.middle = updateFingerExtension(
-      fingerExtended.middle, lf.fingerRatios.middle, c.fingerOpenRatio, c.fingerCloseRatio,
-    );
-    fingerExtended.ring = updateFingerExtension(
-      fingerExtended.ring, lf.fingerRatios.ring, c.fingerOpenRatio, c.fingerCloseRatio,
-    );
-    fingerExtended.pinky = updateFingerExtension(
-      fingerExtended.pinky, lf.fingerRatios.pinky, c.fingerOpenRatio, c.fingerCloseRatio,
-    );
-    const extendedCount =
-      (fingerExtended.thumb ? 1 : 0) +
-      (fingerExtended.index ? 1 : 0) +
-      (fingerExtended.middle ? 1 : 0) +
-      (fingerExtended.ring ? 1 : 0) +
-      (fingerExtended.pinky ? 1 : 0);
-    // Treat a fist (0) as 1 voice (mono root) -- a "no voice" state is
-    // already covered by the right-hand pinch gate.
-    chordSize = Math.max(1, Math.min(c.maxVoices, extendedCount));
-
-    // Openness -> wet/dry (one-euro smoothed). Inverted: closed fist =
-    // most-wet, open palm = drier (carrier shows through).
     const smOpenness = smoothLeftOpenness!.filter(lf.openness, now);
-    const { opennessMin, opennessMax, wetMin, wetMax } = MAPPING.wetDry;
-    const wet = mapRange(smOpenness, opennessMin, opennessMax, wetMax, wetMin);
-    masterFx.setWetDry(wet);
-    lastWetLevel = wet;
+    const { opennessMin, opennessMax } = MAPPING.density;
+    lastDensity = mapRange(smOpenness, opennessMin, opennessMax, 0, 1);
   } else {
     lastLeftFeatures = null;
     smoothLeftOpenness?.reset();
+    // Density held at its last value -- when the hand reappears it picks
+    // up where it left off rather than jumping.
   }
-  lastChordSize = chordSize;
 
   // -----------------------------------------------------------------------
   // TWO-HAND DISTANCE: horizontal -> reverb send level (placeholder until
@@ -791,15 +745,20 @@ function driveAudio(
   }
   lastSnappedMidi = snapped;
 
-  // Build the chord voicing from the snapped root + finger-count chord size.
-  const chordMidis = chordFromScale(
+  // --- Auto-triad with density-controlled upper-voice gain --------------
+  // Always build a 3-note diatonic triad on the snapped root. The root
+  // voice is always at full gain (the melody line you'd hear at density=0);
+  // the third and fifth fade in continuously with the density value.
+  const triadMidis = chordFromScale(
     snapped,
-    chordSize,
+    MAPPING.density.voiceCount, // 3
     currentScale(),
     MAPPING.scale.root,
   );
-  const freqs = chordMidis.map(midiToHz);
-  carrier.setVoices(freqs);
+  const freqs = triadMidis.map(midiToHz);
+  // levels: root always full; upper two scale with density.
+  const levels = [1, lastDensity, lastDensity];
+  carrier.setVoicesWithLevels(freqs, levels);
 
   // --- Mode crossfade driven by pinch with hysteresis ------------------
   //   pinch HIGH (fingers spread, "unpinched") -> robot mix
@@ -929,26 +888,31 @@ function updateDebug(
     lines.push('right: (no right hand)');
   }
 
-  // Phase 4 readouts: chord, wet/dry, reverb send.
-  const fingers = `T${fingerExtended.thumb ? 1 : 0} I${fingerExtended.index ? 1 : 0} M${fingerExtended.middle ? 1 : 0} R${fingerExtended.ring ? 1 : 0} P${fingerExtended.pinky ? 1 : 0}`;
+  // Left hand: openness -> density mapping.
   if (lastLeftFeatures) {
+    const densityLabel =
+      lastDensity < 0.05 ? 'mono root'
+      : lastDensity > 0.95 ? 'full triad'
+      : 'mono ↔ triad';
     lines.push(
-      `left:  openness=${lastLeftFeatures.openness.toFixed(2)}  fingers ${fingers}  chord=${lastChordSize}`,
+      `left:  openness=${lastLeftFeatures.openness.toFixed(2)}  density=${(lastDensity * 100).toFixed(0)}% (${densityLabel})`,
     );
   } else {
-    lines.push('left:  (no left hand)');
+    lines.push('left:  (no left hand) -- density held');
   }
   if (lastSnappedMidi !== null && carrier) {
-    const chordMidis = chordFromScale(
+    const triadMidis = chordFromScale(
       lastSnappedMidi,
-      lastChordSize,
+      MAPPING.density.voiceCount,
       currentScale(),
       MAPPING.scale.root,
     );
-    lines.push(`chord: [${chordMidis.map(midiName).join(', ')}]`);
+    const audibleLevels = [1, lastDensity, lastDensity].map((l) => (l * 100).toFixed(0) + '%');
+    lines.push(`triad: [${triadMidis.map(midiName).join(', ')}] @ [${audibleLevels.join(', ')}]`);
   }
+  const fixedWet = masterFx ? masterFx.wetLevel : MAPPING.masterFx.initialWet ?? 1;
   lines.push(
-    `master: wet=${(lastWetLevel * 100).toFixed(0)}%  reverbSend=${(lastReverbSend * 100).toFixed(0)}% (Phase 5 will route)`,
+    `master: wet=${(fixedWet * 100).toFixed(0)}% (fixed)  reverbSend=${(lastReverbSend * 100).toFixed(0)}%`,
   );
 
   for (let i = 0; i < hands.length; i++) {

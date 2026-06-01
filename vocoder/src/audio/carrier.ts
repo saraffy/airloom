@@ -135,6 +135,18 @@ export class CarrierVoice {
     this.gainEnv.gain.setTargetAtTime(target, now, tc);
   }
 
+  /**
+   * Continuous voice level in [0, 1]. Used for crossfading harmonic
+   * voices in/out (e.g. left-hand openness → density). Short fixed time
+   * constant so the gain tracks the gesture without zipper noise, while
+   * still being fast enough that the user perceives the openness change
+   * immediately.
+   */
+  setLevel(level: number): void {
+    const clamped = Math.max(0, Math.min(1, level));
+    this.gainEnv.gain.setTargetAtTime(clamped, this.ctx.currentTime, 0.02);
+  }
+
   /** Stop all sources permanently. Voice is unusable after this. */
   dispose(): void {
     try { this.saw.stop(); } catch { /* already stopped */ }
@@ -212,6 +224,26 @@ export class CarrierSynth {
         v.setGate(true);
       } else {
         v.setGate(false);
+      }
+    }
+  }
+
+  /**
+   * Set voice frequencies AND continuous per-voice levels. Like setVoices,
+   * but instead of binary gate on/off, each voice's gain is a continuous
+   * 0..1 value -- used by the auto-triad + density mapping to crossfade
+   * the upper voices in/out with left-hand openness.
+   *
+   * Voice indices past `levels.length` are explicitly silenced.
+   */
+  setVoicesWithLevels(freqs: number[], levels: number[]): void {
+    for (let i = 0; i < this.voices.length; i++) {
+      const v = this.voices[i]!;
+      if (i < freqs.length) {
+        v.setFrequency(freqs[i]!);
+        v.setLevel(levels[i] ?? 1);
+      } else {
+        v.setLevel(0);
       }
     }
   }
