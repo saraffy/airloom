@@ -70,6 +70,9 @@ let vocoder: Vocoder | null = null;
 let noiseGate: NoiseGate | null = null;
 let micStream: MediaStream | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
+// The mic's native sample rate (from MediaStreamTrack settings). If this
+// equals audioCtx.sampleRate, there's no resample between input and graph.
+let micSampleRate: number | null = null;
 // Two parallel gain switches between the mic and the vocoder modulator
 // so a single key press can A/B the noise gate without touching anything
 // else in the graph. See installNoiseGateToggle() below.
@@ -238,11 +241,39 @@ async function start(): Promise<void> {
     }
 
     // --- Audio engine -----------------------------------------------------
-    // `latencyHint: 'interactive'` asks the browser for the lowest-latency
-    // buffer size it can offer. We deliberately DO NOT pin sampleRate --
-    // letting the context match the input device avoids a resample stage
-    // between MediaStreamSource and the graph.
-    audioCtx = new AudioContext({ latencyHint: 'interactive' });
+    // Two latency-shaving tricks:
+    //
+    // 1. SAMPLE-RATE MATCH: read the mic's native sample rate from its
+    //    MediaStreamTrack settings and PIN the AudioContext to that rate.
+    //    Default Web Audio behaviour is to run at 44100 (or whatever the
+    //    browser chooses), which triggers a resample on MediaStreamSource
+    //    if the input device is e.g. 48000. Matching eliminates that
+    //    resample stage entirely.
+    //
+    // 2. NUMERIC latencyHint: 0.01 (=10ms preferred) asks the browser for
+    //    a tighter output buffer than the string 'interactive' tends to
+    //    pick. Browsers are free to round up to whatever the device/OS
+    //    allows; we just report what we got. Underruns on too-small
+    //    buffers are unrecoverable here -- there's no glitch callback in
+    //    the spec -- so the user has to listen for crackling and we
+    //    revert if it's bad.
+    const audioTrack = micStream.getAudioTracks()[0];
+    const trackSettings = audioTrack?.getSettings();
+    micSampleRate = typeof trackSettings?.sampleRate === 'number' ? trackSettings.sampleRate : null;
+
+    const ctxOptions: AudioContextOptions = { latencyHint: 0.01 };
+    if (micSampleRate && micSampleRate > 0) {
+      ctxOptions.sampleRate = micSampleRate;
+    }
+
+    try {
+      audioCtx = new AudioContext(ctxOptions);
+    } catch (err) {
+      // Browser rejected the requested sampleRate (uncommon but possible).
+      // Fall back to numeric hint without pinning rate.
+      console.warn('[vocoder] AudioContext rejected sampleRate', micSampleRate, ':', err);
+      audioCtx = new AudioContext({ latencyHint: 0.01 });
+    }
     await audioCtx.resume();
 
     carrier = new CarrierSynth(audioCtx);
@@ -290,10 +321,12 @@ async function start(): Promise<void> {
     // Surface the actual platform latency once everything is wired.
     const base = audioCtx.baseLatency * 1000;
     const out = (audioCtx.outputLatency ?? 0) * 1000;
+    const resampling = micSampleRate !== null && micSampleRate !== audioCtx.sampleRate;
     console.log(
-      `[vocoder] audio context: sampleRate=${audioCtx.sampleRate}Hz ` +
+      `[vocoder] audio: mic=${micSampleRate ?? '?'}Hz ctx=${audioCtx.sampleRate}Hz ` +
+        `resampling=${resampling} ` +
         `baseLatency=${base.toFixed(2)}ms outputLatency=${out.toFixed(2)}ms ` +
-        `total=${(base + out).toFixed(2)}ms latencyHint=interactive`,
+        `total=${(base + out).toFixed(2)}ms latencyHint=0.01`,
     );
 
     running = true;
@@ -549,7 +582,14 @@ function updateDebug(
   if (audioCtx) {
     const baseMs = audioCtx.baseLatency * 1000;
     const outMs = (audioCtx.outputLatency ?? 0) * 1000;
-    latencyLine = `audio: sr=${audioCtx.sampleRate}Hz  base=${baseMs.toFixed(1)}ms  output=${outMs.toFixed(1)}ms  total=${(baseMs + outMs).toFixed(1)}ms`;
+    const ctxSr = audioCtx.sampleRate;
+    const srInfo =
+      micSampleRate && micSampleRate !== ctxSr
+        ? `${ctxSr}Hz (mic=${micSampleRate}Hz, RESAMPLING)`
+        : micSampleRate
+          ? `${ctxSr}Hz (mic-matched)`
+          : `${ctxSr}Hz`;
+    latencyLine = `audio: sr=${srInfo}  base=${baseMs.toFixed(1)}ms  output=${outMs.toFixed(1)}ms  total=${(baseMs + outMs).toFixed(1)}ms`;
   }
 
   const lines: string[] = [
