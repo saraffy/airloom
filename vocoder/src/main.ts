@@ -241,7 +241,7 @@ async function start(): Promise<void> {
     }
 
     // --- Audio engine -----------------------------------------------------
-    // Two latency-shaving tricks:
+    // Latency strategy:
     //
     // 1. SAMPLE-RATE MATCH: read the mic's native sample rate from its
     //    MediaStreamTrack settings and PIN the AudioContext to that rate.
@@ -250,18 +250,19 @@ async function start(): Promise<void> {
     //    if the input device is e.g. 48000. Matching eliminates that
     //    resample stage entirely.
     //
-    // 2. NUMERIC latencyHint: 0.01 (=10ms preferred) asks the browser for
-    //    a tighter output buffer than the string 'interactive' tends to
-    //    pick. Browsers are free to round up to whatever the device/OS
-    //    allows; we just report what we got. Underruns on too-small
-    //    buffers are unrecoverable here -- there's no glitch callback in
-    //    the spec -- so the user has to listen for crackling and we
-    //    revert if it's bad.
+    // 2. latencyHint: 'interactive'. The numeric form (e.g. 0.01) was
+    //    tried and BACKFIRED on this machine -- Chrome interpreted the
+    //    aggressive request by choosing a LARGER "safe" output buffer,
+    //    pushing total latency from ~20ms up to ~38ms. The string hint
+    //    'interactive' tells Chrome "give me the lowest you reliably
+    //    can" and it picks the right buffer without the negotiation
+    //    rebound. Don't change this unless measuring confirms an
+    //    improvement on multiple machines.
     const audioTrack = micStream.getAudioTracks()[0];
     const trackSettings = audioTrack?.getSettings();
     micSampleRate = typeof trackSettings?.sampleRate === 'number' ? trackSettings.sampleRate : null;
 
-    const ctxOptions: AudioContextOptions = { latencyHint: 0.01 };
+    const ctxOptions: AudioContextOptions = { latencyHint: 'interactive' };
     if (micSampleRate && micSampleRate > 0) {
       ctxOptions.sampleRate = micSampleRate;
     }
@@ -270,9 +271,9 @@ async function start(): Promise<void> {
       audioCtx = new AudioContext(ctxOptions);
     } catch (err) {
       // Browser rejected the requested sampleRate (uncommon but possible).
-      // Fall back to numeric hint without pinning rate.
+      // Fall back to interactive hint without pinning rate.
       console.warn('[vocoder] AudioContext rejected sampleRate', micSampleRate, ':', err);
-      audioCtx = new AudioContext({ latencyHint: 0.01 });
+      audioCtx = new AudioContext({ latencyHint: 'interactive' });
     }
     await audioCtx.resume();
 
@@ -326,7 +327,7 @@ async function start(): Promise<void> {
       `[vocoder] audio: mic=${micSampleRate ?? '?'}Hz ctx=${audioCtx.sampleRate}Hz ` +
         `resampling=${resampling} ` +
         `baseLatency=${base.toFixed(2)}ms outputLatency=${out.toFixed(2)}ms ` +
-        `total=${(base + out).toFixed(2)}ms latencyHint=0.01`,
+        `total=${(base + out).toFixed(2)}ms latencyHint=interactive`,
     );
 
     running = true;
