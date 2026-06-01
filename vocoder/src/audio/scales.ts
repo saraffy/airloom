@@ -156,6 +156,55 @@ function adjacentScaleNotes(
   return { above, below };
 }
 
+// ----------------------------------------------------------------------------
+// Chord building
+// ----------------------------------------------------------------------------
+// Phase 4: the left hand's extended-finger count selects a chord size, and
+// chordFromScale() builds the actual voicing by stacking "thirds" (every
+// other scale degree) on top of the right-hand root. So a 3-finger chord
+// above MIDI 65 in C major comes out as [F, A, C]; in C pentatonic minor
+// the same gesture is [F, A#, D#].
+// ----------------------------------------------------------------------------
+
+/**
+ * Build a chord above `rootMidi` by stacking every-other scale degree.
+ *
+ * @param rootMidi    MIDI note the chord sits on. Should be on the scale
+ *                    (caller usually passes the hysteresis-snapped pitch).
+ * @param voiceCount  How many voices (>= 1). Clamped to [1, scale.length*N].
+ * @param scale       Scale semitone offsets (e.g. SCALES.major).
+ * @param scaleRoot   Pitch class of the scale's tonic (0..11).
+ * @returns           Sorted-ascending MIDI notes, length = voiceCount.
+ */
+export function chordFromScale(
+  rootMidi: number,
+  voiceCount: number,
+  scale: readonly number[],
+  scaleRoot: number,
+): number[] {
+  const n = Math.max(1, Math.floor(voiceCount));
+
+  // Find where rootMidi sits in the scale lattice. If it isn't exactly on
+  // a scale note, snap it down to the nearest below for chord-building.
+  const semitone = rootMidi - scaleRoot;
+  const octave = Math.floor(semitone / 12);
+  const pc = ((semitone % 12) + 12) % 12;
+  let rootDegree = 0;
+  for (let i = 0; i < scale.length; i++) {
+    if (scale[i]! <= pc) rootDegree = i;
+    if (scale[i]! === pc) break;
+  }
+
+  const result: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const degIdx = rootDegree + i * 2; // every other degree = "thirds" in-scale
+    const octOffset = Math.floor(degIdx / scale.length) * 12;
+    const degree = scale[degIdx % scale.length]!;
+    result.push(scaleRoot + octave * 12 + degree + octOffset);
+  }
+  return result;
+}
+
 /**
  * Snap to nearest scale note, but stick to `previousSnap` until the input
  * has crossed the natural midpoint by `hystSemi` extra semitones in either

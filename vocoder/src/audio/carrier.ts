@@ -144,33 +144,88 @@ export class CarrierVoice {
 }
 
 // ============================================================================
-// CarrierSynth -- thin wrapper around (currently) one voice.
+// CarrierSynth -- polyphonic carrier (up to N voices).
 //
-// Why bother with a wrapper at all? Because Phase 4 will turn this into a
-// proper polyphonic synth (multiple voices for chords), and the rest of the
-// app should stay oblivious. Today its API is just setFrequency / setGate.
+// Phase 4 promoted this from monophonic to polyphonic so the left hand's
+// finger count can select chord sizes (1 = mono root, 3 = triad, 5 = full
+// pentad, etc.). The vocoder still sees ONE summed carrier signal because
+// all voices share the same modulator (mic) for vocoding -- chord notes
+// get vocoded together.
+//
+// setVoices(freqs) opens the first freqs.length voices and silences the
+// rest. Per-voice gain attenuation prevents clipping as voice count grows.
+// setFrequency() / setGate() are kept for backwards compatibility with the
+// monophonic call sites (they delegate to a single-voice setVoices).
 // ============================================================================
+
+export interface CarrierSynthOptions {
+  /** Maximum simultaneous voices. */
+  maxVoices?: number;
+  /**
+   * Output trim. Master gate / FX chain live downstream, so leave headroom
+   * here for the eventual sum across multiple voices.
+   */
+  outputGain?: number;
+}
+
+const SYNTH_DEFAULTS: Required<CarrierSynthOptions> = {
+  maxVoices: 5,
+  outputGain: 0.4,
+};
 
 export class CarrierSynth {
   readonly ctx: AudioContext;
   readonly output: GainNode;
-  private readonly voice: CarrierVoice;
+  readonly maxVoices: number;
+  private readonly voices: CarrierVoice[];
 
-  constructor(ctx: AudioContext) {
+  constructor(ctx: AudioContext, opts: CarrierSynthOptions = {}) {
+    const merged = { ...SYNTH_DEFAULTS, ...opts };
     this.ctx = ctx;
-    this.voice = new CarrierVoice(ctx);
+    this.maxVoices = merged.maxVoices;
 
-    // Master output trim. Keep some headroom for the Phase-5 FX chain.
     this.output = ctx.createGain();
-    this.output.gain.value = 0.4;
-    this.voice.output.connect(this.output);
+    // Per-voice attenuation so a full pentad doesn't clip relative to mono.
+    // sqrt(N) keeps perceived loudness roughly constant.
+    this.output.gain.value = merged.outputGain / Math.sqrt(merged.maxVoices);
+
+    this.voices = [];
+    for (let i = 0; i < merged.maxVoices; i++) {
+      const v = new CarrierVoice(ctx);
+      v.output.connect(this.output);
+      // Voices start gated off; setVoices() opens the active ones.
+      this.voices.push(v);
+    }
   }
 
+  /**
+   * Activate the first `freqs.length` voices at the given frequencies
+   * (gates them open) and silence the rest. The number of active voices
+   * becomes the chord size.
+   */
+  setVoices(freqs: number[]): void {
+    const n = Math.min(freqs.length, this.voices.length);
+    for (let i = 0; i < this.voices.length; i++) {
+      const v = this.voices[i]!;
+      if (i < n) {
+        v.setFrequency(freqs[i]!);
+        v.setGate(true);
+      } else {
+        v.setGate(false);
+      }
+    }
+  }
+
+  /** Monophonic shorthand: open voice 0 at this frequency, mute the rest. */
   setFrequency(hz: number): void {
-    this.voice.setFrequency(hz);
+    this.setVoices([hz]);
   }
 
-  setGate(open: boolean): void {
-    this.voice.setGate(open);
+  /**
+   * No-op since Phase 3 -- the master mute lives on the vocoder output.
+   * Kept for compatibility with the older single-voice gate API.
+   */
+  setGate(_open: boolean): void {
+    // intentionally empty
   }
 }

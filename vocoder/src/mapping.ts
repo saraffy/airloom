@@ -13,6 +13,8 @@
 import { SCALES, type ScaleName } from './audio/scales';
 import type { VocoderOptions } from './audio/vocoder';
 import type { NoiseGateOptions } from './audio/noiseGate';
+import type { MasterFXOptions } from './audio/masterFx';
+import type { OneEuroFilterOptions } from './smoothing';
 
 export interface Mapping {
   pitch: {
@@ -72,6 +74,52 @@ export interface Mapping {
    *  0 = no stickiness, ~3 = ~100ms at 30fps, ~6 = ~200ms.
    */
   handStickyFrames: number;
+  /**
+   * Chord stacking from the left hand's extended-finger count.
+   *   1 finger  -> 1 voice  (mono root)
+   *   2..N      -> N voices stacked in "thirds" (every other scale degree)
+   * fingerOpenRatio / fingerCloseRatio give per-finger hysteresis so the
+   * count doesn't chatter at extension boundaries.
+   */
+  chord: {
+    /** Max simultaneous voices. */
+    maxVoices: number;
+    /** Per-finger ratio above which a finger flips to "extended". */
+    fingerOpenRatio: number;
+    /** Per-finger ratio below which an extended finger flips to "curled". */
+    fingerCloseRatio: number;
+    /** Same pair for the thumb (geometrically different from other fingers). */
+    thumbOpenRatio: number;
+    thumbCloseRatio: number;
+  };
+  /**
+   * Left-hand openness -> wet/dry mix. Linear map: openness in
+   * [opennessMin, opennessMax] linearly maps to wet in [wetMin, wetMax].
+   * wet = 1 -> full vocoded; wet = 0 -> full dry carrier.
+   */
+  wetDry: {
+    opennessMin: number;
+    opennessMax: number;
+    wetMin: number;
+    wetMax: number;
+  };
+  /**
+   * Two-hand horizontal distance -> reverb send level. Distance is the
+   * absolute difference in wrist x (0..1 frame-relative).
+   */
+  reverbSend: {
+    distanceMin: number;
+    distanceMax: number;
+    sendMin: number;
+    sendMax: number;
+  };
+  /** Pass-through options to MasterFX. */
+  masterFx: MasterFXOptions;
+  /**
+   * One-euro filter parameters applied to every continuous gesture value
+   * (right wristY, left openness, two-hand distance). See smoothing.ts.
+   */
+  smoothing: OneEuroFilterOptions;
 }
 
 export const MAPPING: Mapping = {
@@ -113,7 +161,47 @@ export const MAPPING: Mapping = {
     envSmoothSec: 0.020,
   },
   handStickyFrames: 8,            // ~270ms bridge for tracker dropouts at 30fps
+  chord: {
+    maxVoices: 5,                 // 1=mono, 5=open pentad
+    // Per-finger ratios -- empirical, calibrated against typical hand poses.
+    fingerOpenRatio: 0.85,        // tip > 85% palm-length from MCP -> extended
+    fingerCloseRatio: 0.65,
+    thumbOpenRatio: 0.55,         // thumb's geometry is different
+    thumbCloseRatio: 0.40,
+  },
+  wetDry: {
+    // Openness range covers fist (≈ 1.0) through fully-spread palm (≈ 3.0).
+    // Mapping is INVERTED: fist = full wet (vocoded), open = drier carrier.
+    opennessMin: 1.0,
+    opennessMax: 3.0,
+    wetMin: 0.35,                 // open palm: a bit of dry carrier comes through
+    wetMax: 1.0,                  // fist: full vocoded
+  },
+  reverbSend: {
+    // Horizontal hand distance: hands together ≈ 0.05, arms wide ≈ 0.7.
+    distanceMin: 0.10,
+    distanceMax: 0.70,
+    sendMin: 0,
+    sendMax: 0.7,
+  },
+  masterFx: {
+    dryCarrierTrim: 0.3,
+    initialWet: 1.0,
+  },
+  smoothing: {
+    // Hand tracking runs at 30 fps with notable per-frame jitter.
+    // minCutoff 1.0Hz removes that jitter at rest; beta 0.1 opens the
+    // cutoff during deliberate motion so there's minimal lag.
+    minCutoff: 1.0,
+    beta: 0.1,
+    dCutoff: 1.0,
+  },
 };
+
+export interface ResolvedChord {
+  voices: number[];     // MIDI notes
+  fingerCount: number;  // count from left-hand extension hysteresis (0..maxVoices)
+}
 
 /** Convenience accessor for the current scale's semitone offsets. */
 export function currentScale(): readonly number[] {

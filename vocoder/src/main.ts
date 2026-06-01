@@ -41,9 +41,16 @@ import type { Category, NormalizedLandmark } from '@mediapipe/tasks-vision';
 import { CarrierSynth } from './audio/carrier';
 import { Vocoder } from './audio/vocoder';
 import { NoiseGate } from './audio/noiseGate';
+import { MasterFX } from './audio/masterFx';
 import { extractFeatures, type HandFeatures } from './gestures';
-import { midiName, midiToHz, quantizeToScaleHysteresis } from './audio/scales';
+import {
+  chordFromScale,
+  midiName,
+  midiToHz,
+  quantizeToScaleHysteresis,
+} from './audio/scales';
 import { MAPPING, currentScale } from './mapping';
+import { OneEuroFilter, mapRange } from './smoothing';
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -68,11 +75,37 @@ let audioCtx: AudioContext | null = null;
 let carrier: CarrierSynth | null = null;
 let vocoder: Vocoder | null = null;
 let noiseGate: NoiseGate | null = null;
+let masterFx: MasterFX | null = null;
 let micStream: MediaStream | null = null;
 let micSource: MediaStreamAudioSourceNode | null = null;
 // The mic's native sample rate (from MediaStreamTrack settings). If this
 // equals audioCtx.sampleRate, there's no resample between input and graph.
 let micSampleRate: number | null = null;
+
+// --- Phase 4: smoothing + chord-extension state -----------------------------
+//
+// One-euro filters for every continuous gesture value. Created in start()
+// with parameters from MAPPING.smoothing. Reset when the corresponding
+// hand vanishes so reappearance doesn't trigger a stale-derivative spike.
+let smoothRightWristY: OneEuroFilter | null = null;
+let smoothLeftOpenness: OneEuroFilter | null = null;
+let smoothHandDistance: OneEuroFilter | null = null;
+
+// Per-finger extension hysteresis (boolean state per finger, updated each
+// time the left hand is seen). The integer chord size is the count of
+// `true` entries plus a min of 1 (so a fist still plays mono).
+let fingerExtended = {
+  thumb: false,
+  index: false,
+  middle: false,
+  ring: false,
+  pinky: false,
+};
+let lastChordSize = 1;
+let lastWetLevel = 1;
+let lastReverbSend = 0;
+// Cached features per side for debug + audio.
+let lastLeftFeatures: HandFeatures | null = null;
 // Two parallel gain switches between the mic and the vocoder modulator
 // so a single key press can A/B the noise gate without touching anything
 // else in the graph. See installNoiseGateToggle() below.
@@ -277,16 +310,25 @@ async function start(): Promise<void> {
     }
     await audioCtx.resume();
 
-    carrier = new CarrierSynth(audioCtx);
-    // Carrier is permanently "on"; the master gate inside the Vocoder is
-    // now the single source of truth for audibility.
-    carrier.setGate(true);
+    // Polyphonic carrier (max 5 voices). Voices start gated off; the first
+    // driveAudio() with a visible right hand opens voice 0 via setVoices().
+    carrier = new CarrierSynth(audioCtx, { maxVoices: MAPPING.chord.maxVoices });
 
     setStatus('Loading vocoder…');
     vocoder = await Vocoder.create(audioCtx, MAPPING.vocoder);
 
     setStatus('Loading noise gate…');
     noiseGate = await NoiseGate.create(audioCtx, MAPPING.noiseGate);
+
+    // Master FX chain: wet/dry crossfade between vocoded signal and dry
+    // carrier, plus a Phase-5 reverb-send stub.
+    masterFx = new MasterFX(audioCtx, MAPPING.masterFx);
+
+    // One-euro smoothing filters per continuous feature. Same params for
+    // each since all three are gesture-typed values in [0,1]-ish ranges.
+    smoothRightWristY = new OneEuroFilter(MAPPING.smoothing);
+    smoothLeftOpenness = new OneEuroFilter(MAPPING.smoothing);
+    smoothHandDistance = new OneEuroFilter(MAPPING.smoothing);
 
     // Audio graph (with toggleable noise-gate bypass):
     //
@@ -314,8 +356,14 @@ async function start(): Promise<void> {
     gatedPath.connect(vocoder.modulatorIn);
     bypassPath.connect(vocoder.modulatorIn);
 
+    // Carrier feeds BOTH the vocoder (for shaping) AND the MasterFX dry
+    // path (for the openness-controlled wet/dry blend). These are parallel
+    // taps off the same CarrierSynth output -- the vocoder doesn't see
+    // the dry tap and vice versa.
     carrier.output.connect(vocoder.carrierIn);
-    vocoder.output.connect(audioCtx.destination);
+    carrier.output.connect(masterFx.dryCarrierIn);
+    vocoder.output.connect(masterFx.vocodedIn);
+    masterFx.output.connect(audioCtx.destination);
 
     installNoiseGateToggle();
 
@@ -457,44 +505,128 @@ function findHand(handedness: Category[][], label: 'Right' | 'Left'): number {
   return -1;
 }
 
+/**
+ * Update one finger's extension flag using per-finger hysteresis. Returns
+ * the new state.
+ */
+function updateFingerExtension(
+  prev: boolean,
+  ratio: number,
+  openThreshold: number,
+  closeThreshold: number,
+): boolean {
+  if (prev) return ratio >= closeThreshold;
+  return ratio >= openThreshold;
+}
+
 function driveAudio(
   hands: NormalizedLandmark[][],
   handedness: Category[][],
 ): void {
-  if (!carrier || !vocoder) return;
+  if (!carrier || !vocoder || !masterFx) return;
 
-  const rightIdx = findHand(handedness, 'Right');
   const now = performance.now();
+  const rightIdx = findHand(handedness, 'Right');
+  const leftIdx = findHand(handedness, 'Left');
 
+  // -----------------------------------------------------------------------
+  // LEFT HAND: chord size (via finger-count hysteresis) + wet/dry (openness)
+  // -----------------------------------------------------------------------
+  let chordSize = lastChordSize; // hold last value if left hand missing
+  if (leftIdx >= 0) {
+    const lf = extractFeatures(hands[leftIdx]!);
+    lastLeftFeatures = lf;
+
+    const c = MAPPING.chord;
+    fingerExtended.thumb = updateFingerExtension(
+      fingerExtended.thumb, lf.fingerRatios.thumb, c.thumbOpenRatio, c.thumbCloseRatio,
+    );
+    fingerExtended.index = updateFingerExtension(
+      fingerExtended.index, lf.fingerRatios.index, c.fingerOpenRatio, c.fingerCloseRatio,
+    );
+    fingerExtended.middle = updateFingerExtension(
+      fingerExtended.middle, lf.fingerRatios.middle, c.fingerOpenRatio, c.fingerCloseRatio,
+    );
+    fingerExtended.ring = updateFingerExtension(
+      fingerExtended.ring, lf.fingerRatios.ring, c.fingerOpenRatio, c.fingerCloseRatio,
+    );
+    fingerExtended.pinky = updateFingerExtension(
+      fingerExtended.pinky, lf.fingerRatios.pinky, c.fingerOpenRatio, c.fingerCloseRatio,
+    );
+    const extendedCount =
+      (fingerExtended.thumb ? 1 : 0) +
+      (fingerExtended.index ? 1 : 0) +
+      (fingerExtended.middle ? 1 : 0) +
+      (fingerExtended.ring ? 1 : 0) +
+      (fingerExtended.pinky ? 1 : 0);
+    // Treat a fist (0) as 1 voice (mono root) -- a "no voice" state is
+    // already covered by the right-hand pinch gate.
+    chordSize = Math.max(1, Math.min(c.maxVoices, extendedCount));
+
+    // Openness -> wet/dry (one-euro smoothed). Inverted: closed fist =
+    // most-wet, open palm = drier (carrier shows through).
+    const smOpenness = smoothLeftOpenness!.filter(lf.openness, now);
+    const { opennessMin, opennessMax, wetMin, wetMax } = MAPPING.wetDry;
+    const wet = mapRange(smOpenness, opennessMin, opennessMax, wetMax, wetMin);
+    masterFx.setWetDry(wet);
+    lastWetLevel = wet;
+  } else {
+    lastLeftFeatures = null;
+    smoothLeftOpenness?.reset();
+  }
+  lastChordSize = chordSize;
+
+  // -----------------------------------------------------------------------
+  // TWO-HAND DISTANCE: horizontal -> reverb send level (placeholder until
+  // Phase 5 wires the actual ConvolverNode).
+  // -----------------------------------------------------------------------
+  if (leftIdx >= 0 && rightIdx >= 0) {
+    const lWristX = hands[leftIdx]![0]!.x;
+    const rWristX = hands[rightIdx]![0]!.x;
+    const rawDist = Math.abs(lWristX - rWristX);
+    const smDist = smoothHandDistance!.filter(rawDist, now);
+    const { distanceMin, distanceMax, sendMin, sendMax } = MAPPING.reverbSend;
+    const send = mapRange(smDist, distanceMin, distanceMax, sendMin, sendMax);
+    masterFx.setReverbSend(send);
+    lastReverbSend = send;
+  } else {
+    // Only one hand visible: no send.
+    masterFx.setReverbSend(0);
+    lastReverbSend = 0;
+    smoothHandDistance?.reset();
+  }
+
+  // -----------------------------------------------------------------------
+  // RIGHT HAND: pitch + master gate. The audio gate hangover from Phase 3
+  // is unchanged; chord voicing comes from chordSize above.
+  // -----------------------------------------------------------------------
   if (rightIdx < 0) {
-    // --- Right hand missing -------------------------------------------
-    // Start (or continue) the tracking-loss timer. We DO NOT touch the
-    // gate yet -- it stays in whatever state it was in -- so brief
-    // dropouts ride straight through with the audio unchanged.
     if (trackingLostSinceT === null) trackingLostSinceT = now;
     const lostMs = now - trackingLostSinceT;
 
     if (gateOpen && lostMs > MAPPING.gate.trackingHoldMs) {
-      // Sustained loss: close the gate for real (smooth ramp).
       vocoder.setGate(false);
       gateOpen = false;
     }
-    // Pitch is intentionally left at the last value -- the carrier
-    // keeps gliding to it -- so a recovered hand picks up where it
-    // left off. lastRightFeatures stays so the debug box keeps the
-    // last reading visible.
+    // Pitch and chord voicing are intentionally left at last values --
+    // the carrier holds whatever it was playing so a recovered hand
+    // resumes without a phase glitch. lastRightFeatures stays for debug.
+    smoothRightWristY?.reset();
     return;
   }
 
-  // --- Right hand present ----------------------------------------------
   trackingLostSinceT = null;
 
   const f = extractFeatures(hands[rightIdx]!);
   lastRightFeatures = f;
 
-  // --- Pitch mapping ----------------------------------------------------
+  // --- Pitch mapping with one-euro smoothing on wristY ------------------
+  // Smoothing happens BEFORE the hysteresis snap. The snap still has its
+  // own dead-band, but a smoother input means fewer boundary crossings
+  // during slow deliberate motion.
   const { midiLow, midiHigh, yDeadZone, snapHysteresisSemitones } = MAPPING.pitch;
-  const yClamped = clamp(f.wristY, yDeadZone, 1 - yDeadZone);
+  const smY = smoothRightWristY!.filter(f.wristY, now);
+  const yClamped = clamp(smY, yDeadZone, 1 - yDeadZone);
   const yNorm = (yClamped - yDeadZone) / (1 - 2 * yDeadZone);
   const rawMidi = midiHigh - yNorm * (midiHigh - midiLow);
   const snapped = quantizeToScaleHysteresis(
@@ -510,11 +642,18 @@ function driveAudio(
     snapStableFrames = 0;
   }
   lastSnappedMidi = snapped;
-  carrier.setFrequency(midiToHz(snapped));
+
+  // Build the chord voicing from the snapped root + finger-count chord size.
+  const chordMidis = chordFromScale(
+    snapped,
+    chordSize,
+    currentScale(),
+    MAPPING.scale.root,
+  );
+  const freqs = chordMidis.map(midiToHz);
+  carrier.setVoices(freqs);
 
   // --- Master gate (vocoder output) with pinch hysteresis ---------------
-  // The vocoder.setGate() controls the single master mute that covers
-  // BOTH the vocoded carrier path AND the dry-mic blend. Closed = silent.
   const { pinchOpen, pinchClose } = MAPPING.gate;
   if (!gateOpen && f.pinch >= pinchOpen) {
     vocoder.setGate(true);
@@ -632,6 +771,28 @@ function updateDebug(
   } else {
     lines.push('right: (no right hand)');
   }
+
+  // Phase 4 readouts: chord, wet/dry, reverb send.
+  const fingers = `T${fingerExtended.thumb ? 1 : 0} I${fingerExtended.index ? 1 : 0} M${fingerExtended.middle ? 1 : 0} R${fingerExtended.ring ? 1 : 0} P${fingerExtended.pinky ? 1 : 0}`;
+  if (lastLeftFeatures) {
+    lines.push(
+      `left:  openness=${lastLeftFeatures.openness.toFixed(2)}  fingers ${fingers}  chord=${lastChordSize}`,
+    );
+  } else {
+    lines.push('left:  (no left hand)');
+  }
+  if (lastSnappedMidi !== null && carrier) {
+    const chordMidis = chordFromScale(
+      lastSnappedMidi,
+      lastChordSize,
+      currentScale(),
+      MAPPING.scale.root,
+    );
+    lines.push(`chord: [${chordMidis.map(midiName).join(', ')}]`);
+  }
+  lines.push(
+    `master: wet=${(lastWetLevel * 100).toFixed(0)}%  reverbSend=${(lastReverbSend * 100).toFixed(0)}% (Phase 5 will route)`,
+  );
 
   for (let i = 0; i < hands.length; i++) {
     const userLabel = handedness[i]?.[0]?.categoryName ?? '?';
