@@ -55,6 +55,28 @@ import { MAPPING, currentScale } from './mapping';
 import { OneEuroFilter, mapRange } from './smoothing';
 
 // ---------------------------------------------------------------------------
+// LATENCY KNOBS
+// ---------------------------------------------------------------------------
+// Edit these to A/B latency strategies. Both ship at safe defaults --
+// reverting individually if a setting hurts is just changing the constant.
+// ---------------------------------------------------------------------------
+
+/**
+ * Which sample rate should AudioContext run at?
+ *   'output' -- no sampleRate pin; browser picks the OS-preferred rate,
+ *               which typically matches the output device (e.g. 48000 on
+ *               macOS Chrome). The mic input is resampled into the context
+ *               (smaller cost than an output-side resample at the same
+ *               buffer size, since `outputLatency` is usually the larger
+ *               half of total monitoring latency).
+ *   'mic'    -- pin to the mic's native rate. Eliminates the input resample
+ *               but adds an output resample. Tried on the dev machine;
+ *               this approach got 20.8ms total when 'output' might do better.
+ *   'default' -- alias for 'output'.
+ */
+const SAMPLE_RATE_STRATEGY: 'output' | 'mic' | 'default' = 'output';
+
+// ---------------------------------------------------------------------------
 // DOM references
 // ---------------------------------------------------------------------------
 const video = document.getElementById('video') as HTMLVideoElement;
@@ -343,12 +365,18 @@ async function start(): Promise<void> {
     // --- Audio engine -----------------------------------------------------
     // Latency strategy:
     //
-    // 1. SAMPLE-RATE MATCH: read the mic's native sample rate from its
-    //    MediaStreamTrack settings and PIN the AudioContext to that rate.
-    //    Default Web Audio behaviour is to run at 44100 (or whatever the
-    //    browser chooses), which triggers a resample on MediaStreamSource
-    //    if the input device is e.g. 48000. Matching eliminates that
-    //    resample stage entirely.
+    // 1. SAMPLE-RATE STRATEGY (see SAMPLE_RATE_STRATEGY constant):
+    //      'output' (default): DON'T pin sampleRate. The context runs at
+    //         the browser/OS-preferred rate, which is typically the
+    //         OUTPUT device's native rate (e.g. 48000 on macOS Chrome).
+    //         This eliminates an output-side resample at the cost of a
+    //         (smaller) input-side resample for the mic.
+    //      'mic': pin to the mic's native rate. Eliminates the input
+    //         resample but the output is then resampled. Tried earlier;
+    //         on this machine it left total latency around 20ms because
+    //         the output buffer dominated.
+    //      'default': identical to 'output' (no pin). Kept as a distinct
+    //         name so the intent is explicit.
     //
     // 2. latencyHint: 'interactive'. The numeric form (e.g. 0.01) was
     //    tried and BACKFIRED on this machine -- Chrome interpreted the
@@ -363,16 +391,17 @@ async function start(): Promise<void> {
     micSampleRate = typeof trackSettings?.sampleRate === 'number' ? trackSettings.sampleRate : null;
 
     const ctxOptions: AudioContextOptions = { latencyHint: 'interactive' };
-    if (micSampleRate && micSampleRate > 0) {
+    if (SAMPLE_RATE_STRATEGY === 'mic' && micSampleRate && micSampleRate > 0) {
       ctxOptions.sampleRate = micSampleRate;
     }
+    // 'output' / 'default': no sampleRate option -> browser picks OS rate.
 
     try {
       audioCtx = new AudioContext(ctxOptions);
     } catch (err) {
       // Browser rejected the requested sampleRate (uncommon but possible).
       // Fall back to interactive hint without pinning rate.
-      console.warn('[vocoder] AudioContext rejected sampleRate', micSampleRate, ':', err);
+      console.warn('[vocoder] AudioContext rejected sampleRate', ctxOptions.sampleRate, ':', err);
       audioCtx = new AudioContext({ latencyHint: 'interactive' });
     }
     await audioCtx.resume();
@@ -439,7 +468,8 @@ async function start(): Promise<void> {
     const out = (audioCtx.outputLatency ?? 0) * 1000;
     const resampling = micSampleRate !== null && micSampleRate !== audioCtx.sampleRate;
     console.log(
-      `[vocoder] audio: mic=${micSampleRate ?? '?'}Hz ctx=${audioCtx.sampleRate}Hz ` +
+      `[vocoder] audio: strategy=${SAMPLE_RATE_STRATEGY} ` +
+        `mic=${micSampleRate ?? '?'}Hz ctx=${audioCtx.sampleRate}Hz ` +
         `resampling=${resampling} ` +
         `baseLatency=${base.toFixed(2)}ms outputLatency=${out.toFixed(2)}ms ` +
         `total=${(base + out).toFixed(2)}ms latencyHint=interactive`,
@@ -793,9 +823,9 @@ function updateDebug(
     const ctxSr = audioCtx.sampleRate;
     const srInfo =
       micSampleRate && micSampleRate !== ctxSr
-        ? `${ctxSr}Hz (mic=${micSampleRate}Hz, RESAMPLING)`
+        ? `${ctxSr}Hz (mic=${micSampleRate}Hz, RESAMPLING, strategy=${SAMPLE_RATE_STRATEGY})`
         : micSampleRate
-          ? `${ctxSr}Hz (mic-matched)`
+          ? `${ctxSr}Hz (mic-matched, strategy=${SAMPLE_RATE_STRATEGY})`
           : `${ctxSr}Hz`;
     latencyLine = `audio: sr=${srInfo}  base=${baseMs.toFixed(1)}ms  output=${outMs.toFixed(1)}ms  total=${(baseMs + outMs).toFixed(1)}ms`;
   }
