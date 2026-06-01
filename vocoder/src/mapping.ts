@@ -202,9 +202,10 @@ export const MAPPING: Mapping = {
     // Mix natural voice INTO the robot path. ROBOT MODE ONLY -- pinched
     // clean-voice and hand-absent silence are unaffected.
     //   0    = pure robot
-    //   0.35 = clearly audible natural voice on top of robot (default)
+    //   0.35 = clearly audible natural voice on top of robot
+    //   0.5  = close to 50/50, voice well-balanced with robot (current)
     //   1.0  = voice at full mic level alongside robot (louder than robot)
-    voiceBlend: 0.35,
+    voiceBlend: 0.5,
 
     modeXfadeSec: 0.015,          // smooth crossfade between robot/clean/silence
   },
