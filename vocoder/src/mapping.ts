@@ -197,6 +197,15 @@ export const MAPPING: Mapping = {
     limiterThresholdDb: -1,
     robotLevel: 1.0,              // master gain for the robot path when active
     cleanVoiceLevel: 1.2,         // master gain for the clean monitor when pinched
+
+    // ★★★ MAIN VOICE/ROBOT BALANCE KNOB ★★★
+    // Mix natural voice INTO the robot path. ROBOT MODE ONLY -- pinched
+    // clean-voice and hand-absent silence are unaffected.
+    //   0    = pure robot
+    //   0.35 = clearly audible natural voice on top of robot (default)
+    //   1.0  = voice at full mic level alongside robot (louder than robot)
+    voiceBlend: 0.35,
+
     modeXfadeSec: 0.015,          // smooth crossfade between robot/clean/silence
   },
   smoothing: {

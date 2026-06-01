@@ -21,14 +21,25 @@
 //                               ├──► preLimitSum ──► voxOutGain ──┐
 //   dryCarrierIn ──► dryGain ───┤                                  │
 //                                                                  ├──► limiter ──► output
+//   voiceBlendIn ──► voiceBlendGain ──► preLimitSum                │
 //                                                                  │
 //   cleanVoiceIn ──► cleanVoxGain ─────────────────────────────────┘
 //
 //   wetGain/dryGain ──► reverbSend ──► Convolver ──► reverbReturn ──► preLimitSum
 //
-// The wet/dry crossfade applies to the DRY CARRIER blend only. The clean
-// voice path is its own thing -- it doesn't go through wet/dry or reverb,
-// and voxOutGain/cleanVoxGain are mutually exclusive (driven by setMode).
+// The wet/dry crossfade applies to the DRY CARRIER blend only.
+//
+// Two distinct mic taps:
+//   - voiceBlendIn  -- mixed into the ROBOT path (preLimitSum), so it only
+//                      sounds when voxOutGain is up (= unpinched). Used to
+//                      blend natural voice on top of the vocoded carrier.
+//   - cleanVoiceIn  -- routed through cleanVoxGain in parallel to the
+//                      limiter, so it ONLY sounds when setMode('cleanVoice')
+//                      is active (= pinched). Used for clean monitoring.
+//
+// Because voxOutGain and cleanVoxGain are mutually exclusive (driven by
+// setMode), the voice blend is automatically restricted to robot mode --
+// no extra routing logic needed.
 // ============================================================================
 
 export type MasterMode = 'robot' | 'cleanVoice' | 'silence';
@@ -63,6 +74,19 @@ export interface MasterFXOptions {
    * perceived loudness of the vocoded robot path.
    */
   cleanVoiceLevel?: number;
+  /**
+   * ★ MAIN VOICE/ROBOT BALANCE KNOB ★
+   * Gain on the natural-voice signal that's mixed INTO the robot path
+   * alongside the vocoded carrier (active only in unpinched / robot mode;
+   * pinched clean-voice mode and hand-absent silence are unaffected).
+   *   0    = pure robot (no natural voice in the mix)
+   *   0.35 = clearly audible voice on top of robot (default)
+   *   1.0  = voice at full level alongside robot (will be louder than robot)
+   * Tune in MAPPING.masterFx.voiceBlend. The master limiter at -1 dB will
+   * catch peaks, so this won't clip even at 1.0 -- you'll just hear
+   * limiter pumping.
+   */
+  voiceBlend?: number;
   /** Crossfade time constant (sec) for setMode transitions. */
   modeXfadeSec?: number;
 }
@@ -76,6 +100,7 @@ const DEFAULTS: Required<MasterFXOptions> = {
   limiterThresholdDb: -1,
   robotLevel: 1.0,
   cleanVoiceLevel: 1.2,
+  voiceBlend: 0.35,
   modeXfadeSec: 0.015,
 };
 
@@ -90,6 +115,12 @@ export class MasterFX {
    * which is only audible when setMode('cleanVoice') is active.
    */
   readonly cleanVoiceIn: GainNode;
+  /**
+   * Connect the (preferably noise-gated) mic here. Mixed into the robot
+   * path, so only audible when setMode('robot') is active. The dry voice
+   * level inside the robot mix is controlled by `voiceBlend`.
+   */
+  readonly voiceBlendIn: GainNode;
   /** Final summed + limited output. Connect this to destination. */
   readonly output: GainNode;
 
@@ -105,6 +136,8 @@ export class MasterFX {
   private readonly voxOutGain: GainNode;
   /** Master mute for the clean-voice monitor path. */
   private readonly cleanVoxGain: GainNode;
+  /** Voice-blend amount (mic into robot path); controlled by setVoiceBlend. */
+  private readonly voiceBlendGain: GainNode;
   private currentWet: number;
   private currentMode: MasterMode = 'silence';
 
@@ -117,6 +150,7 @@ export class MasterFX {
     this.vocodedIn = ctx.createGain();
     this.dryCarrierIn = ctx.createGain();
     this.cleanVoiceIn = ctx.createGain();
+    this.voiceBlendIn = ctx.createGain();
     this.output = ctx.createGain();
 
     // --- Wet/dry pair (left-hand openness drives setWetDry) -------------
@@ -156,10 +190,18 @@ export class MasterFX {
     this.reverbSendGain.connect(this.convolver);
     this.convolver.connect(this.reverbReturnGain).connect(this.preLimitSum);
 
+    // --- Voice-blend: mic INTO the robot mix ---------------------------
+    // Lands on preLimitSum so it's subject to voxOutGain (only audible
+    // when in robot mode; muted in cleanVoice/silence by the same
+    // crossfade as the vocoded carrier).
+    this.voiceBlendGain = ctx.createGain();
+    this.voiceBlendGain.gain.value = this.opts.voiceBlend;
+    this.voiceBlendIn.connect(this.voiceBlendGain).connect(this.preLimitSum);
+
     // --- Mode crossfade gains -------------------------------------------
-    // The robot path (vocoded + dry carrier + reverb) and the clean voice
-    // path are mutually exclusive. setMode() ramps voxOutGain and
-    // cleanVoxGain in opposite directions to crossfade.
+    // The robot path (vocoded + dry carrier + reverb + voice blend) and
+    // the clean voice monitor path are mutually exclusive. setMode() ramps
+    // voxOutGain and cleanVoxGain in opposite directions to crossfade.
     this.voxOutGain = ctx.createGain();
     this.voxOutGain.gain.value = 0;
     this.preLimitSum.connect(this.voxOutGain);
@@ -228,6 +270,16 @@ export class MasterFX {
     this.cleanVoxGain.gain.setTargetAtTime(cleanTarget, t, tc);
   }
 
+  /**
+   * Live-tune the voice/robot balance (0..1). Smooth-ramped so it can be
+   * driven by automation without clicks. Default comes from
+   * MAPPING.masterFx.voiceBlend.
+   */
+  setVoiceBlend(level: number): void {
+    const l = Math.max(0, Math.min(1, level));
+    this.voiceBlendGain.gain.setTargetAtTime(l, this.ctx.currentTime, 0.02);
+  }
+
   get mode(): MasterMode {
     return this.currentMode;
   }
@@ -238,6 +290,10 @@ export class MasterFX {
 
   get reverbSendLevel(): number {
     return this.reverbSendGain.gain.value;
+  }
+
+  get voiceBlendValue(): number {
+    return this.voiceBlendGain.gain.value;
   }
 
   /** Current limiter gain reduction in dB (positive number = reduction amount). */

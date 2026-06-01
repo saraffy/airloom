@@ -467,7 +467,12 @@ async function start(): Promise<void> {
     // Band path: mic direct to modulator -- saves one worklet hop.
     micSource.connect(vocoder.modulatorIn);
 
-    // Dry-mic path: noise gate (or bypass) routed to vocoder.dryMicIn.
+    // Gated-mic path: noise gate (or bypass) feeds TWO targets:
+    //   - vocoder.dryMicIn   (currently 0% mix; available if you reactivate
+    //                         vocoder.dryMix in MAPPING).
+    //   - masterFx.voiceBlendIn (this is the active voice/robot blend; level
+    //                            comes from MAPPING.masterFx.voiceBlend).
+    // Pressing G crossfades between gated and raw, affecting both targets.
     gatedPath = audioCtx.createGain();
     gatedPath.gain.value = 1;
     bypassPath = audioCtx.createGain();
@@ -479,6 +484,8 @@ async function start(): Promise<void> {
 
     gatedPath.connect(vocoder.dryMicIn);
     bypassPath.connect(vocoder.dryMicIn);
+    gatedPath.connect(masterFx.voiceBlendIn);
+    bypassPath.connect(masterFx.voiceBlendIn);
 
     // Carrier feeds BOTH the vocoder (for shaping) AND the MasterFX dry
     // path (for the openness-controlled wet/dry blend). These are parallel
@@ -898,6 +905,11 @@ function updateDebug(
     const ng = MAPPING.noiseGate;
     lines.push(
       `noiseGate: open ${ng.openDb ?? -45}dB / close ${ng.closeDb ?? -60}dB / hold ${((ng.holdSec ?? 0.4) * 1000).toFixed(0)}ms  ${noiseGateBypassed ? '(BYPASSED -- press G)' : '(active -- press G to bypass)'}`,
+    );
+  }
+  if (masterFx) {
+    lines.push(
+      `voice blend: ${(masterFx.voiceBlendValue * 100).toFixed(0)}% (MAPPING.masterFx.voiceBlend; ROBOT mode only)`,
     );
   }
   if (hangoverMs > 0) {
