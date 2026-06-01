@@ -186,9 +186,10 @@ export const MAPPING: Mapping = {
     //   0.35 = clearly audible natural voice on top of robot
     //   0.5  = close to 50/50, voice well-balanced with robot
     //   0.7  = voice slightly dominant over robot
-    //   0.8  = voice clearly dominant; robot as a texture under it (current)
+    //   0.8  = voice clearly dominant; robot as a texture under it
+    //   0.9  = voice strongly dominant; robot is a faint sub-layer (current)
     //   1.0  = voice at full mic level alongside robot (louder than robot)
-    voiceBlend: 0.8,
+    voiceBlend: 0.9,
 
     modeXfadeSec: 0.015,          // smooth crossfade between robot/clean/silence
   },
