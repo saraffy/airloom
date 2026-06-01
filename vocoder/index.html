@@ -10,7 +10,7 @@
     <main id="app">
       <header>
         <h1>Gesture Vocoder</h1>
-        <p class="subtitle">Hand-controlled voice synthesizer</p>
+        <p class="subtitle">Hand-controlled voice synthesizer · right hand: pitch &amp; gate · left hand: chord &amp; wet/dry · two-hand distance: reverb</p>
       </header>
 
       <section class="stage">
@@ -24,9 +24,70 @@
       </section>
 
       <section class="controls">
-        <button id="start-btn" type="button">Start</button>
-        <div id="status" class="status">Click <strong>Start</strong> to grant camera + mic access.</div>
-        <pre id="debug" class="debug"></pre>
+        <div class="control-row primary-row">
+          <button id="start-btn" type="button">Start</button>
+          <div id="status" class="status">Click <strong>Start</strong> to grant camera + mic access.</div>
+        </div>
+
+        <div class="control-row pickers">
+          <label class="picker">
+            <span class="picker-label">Scale</span>
+            <select id="scale-name">
+              <option value="chromatic">Chromatic</option>
+              <option value="major">Major</option>
+              <option value="minor">Minor</option>
+              <option value="pentatonicMajor">Pentatonic Major</option>
+              <option value="pentatonicMinor" selected>Pentatonic Minor</option>
+              <option value="dorian">Dorian</option>
+              <option value="mixolydian">Mixolydian</option>
+            </select>
+          </label>
+          <label class="picker">
+            <span class="picker-label">Key</span>
+            <select id="scale-root">
+              <option value="0" selected>C</option>
+              <option value="1">C♯ / D♭</option>
+              <option value="2">D</option>
+              <option value="3">D♯ / E♭</option>
+              <option value="4">E</option>
+              <option value="5">F</option>
+              <option value="6">F♯ / G♭</option>
+              <option value="7">G</option>
+              <option value="8">G♯ / A♭</option>
+              <option value="9">A</option>
+              <option value="10">A♯ / B♭</option>
+              <option value="11">B</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="meters">
+          <div class="meter">
+            <div class="meter-label">Gate</div>
+            <div id="meter-gate" class="meter-value off">closed</div>
+          </div>
+          <div class="meter">
+            <div class="meter-label">Note</div>
+            <div id="meter-note" class="meter-value">—</div>
+          </div>
+          <div class="meter">
+            <div class="meter-label">Chord</div>
+            <div id="meter-chord" class="meter-value">—</div>
+          </div>
+          <div class="meter">
+            <div class="meter-label">Wet</div>
+            <div class="bar"><div id="meter-wet" class="bar-fill"></div></div>
+          </div>
+          <div class="meter">
+            <div class="meter-label">Reverb</div>
+            <div class="bar"><div id="meter-reverb" class="bar-fill"></div></div>
+          </div>
+        </div>
+
+        <details class="debug-wrap">
+          <summary>Debug info</summary>
+          <pre id="debug" class="debug"></pre>
+        </details>
       </section>
     </main>
 

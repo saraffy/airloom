@@ -72,12 +72,24 @@ header h1 {
 
 .controls {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 14px;
   background: var(--panel);
   padding: 16px;
   border-radius: var(--radius);
+}
+
+.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+}
+.primary-row {
+  align-items: center;
+}
+.pickers {
+  gap: 18px;
 }
 
 button#start-btn {
@@ -109,8 +121,7 @@ button#start-btn:disabled {
 .status.err { color: var(--danger); }
 
 .debug {
-  flex: 1 1 100%;
-  margin: 0;
+  margin: 8px 0 0;
   padding: 10px 12px;
   background: #0a0b0f;
   border-radius: 6px;
@@ -119,4 +130,102 @@ button#start-btn:disabled {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
   min-height: 60px;
+}
+
+/* --- Pickers -------------------------------------------------------- */
+.picker {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.picker-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.picker select {
+  background: #0a0b0f;
+  color: var(--fg);
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.95rem;
+  font-family: inherit;
+  cursor: pointer;
+  min-width: 160px;
+}
+.picker select:focus {
+  outline: 2px solid var(--accent-dim);
+  border-color: var(--accent-dim);
+}
+
+/* --- Meters --------------------------------------------------------- */
+.meters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.meter {
+  flex: 1 1 130px;
+  background: #0a0b0f;
+  padding: 9px 12px;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 56px;
+  justify-content: center;
+}
+.meter-label {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.meter-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--fg);
+}
+.meter-value.off {
+  color: var(--muted);
+  font-weight: 400;
+}
+.meter-value.on {
+  color: var(--accent);
+}
+.bar {
+  height: 10px;
+  background: #1a1c22;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+  transition: width 0.05s linear;
+}
+
+/* --- Debug collapsible --------------------------------------------- */
+.debug-wrap {
+  margin-top: 4px;
+}
+.debug-wrap > summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 0;
+  user-select: none;
+}
+.debug-wrap > summary:hover {
+  color: var(--fg);
+}
+.debug-wrap[open] > summary {
+  color: var(--fg);
 }

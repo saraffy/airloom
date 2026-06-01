@@ -48,6 +48,8 @@ import {
   midiName,
   midiToHz,
   quantizeToScaleHysteresis,
+  NOTE_NAMES,
+  type ScaleName,
 } from './audio/scales';
 import { MAPPING, currentScale } from './mapping';
 import { OneEuroFilter, mapRange } from './smoothing';
@@ -61,6 +63,13 @@ const ctx = canvas.getContext('2d')!;
 const startBtn = document.getElementById('start-btn') as HTMLButtonElement;
 const statusEl = document.getElementById('status') as HTMLDivElement;
 const debugEl = document.getElementById('debug') as HTMLPreElement;
+const scaleNameSel = document.getElementById('scale-name') as HTMLSelectElement;
+const scaleRootSel = document.getElementById('scale-root') as HTMLSelectElement;
+const meterGate = document.getElementById('meter-gate') as HTMLDivElement;
+const meterNote = document.getElementById('meter-note') as HTMLDivElement;
+const meterChord = document.getElementById('meter-chord') as HTMLDivElement;
+const meterWet = document.getElementById('meter-wet') as HTMLDivElement;
+const meterReverb = document.getElementById('meter-reverb') as HTMLDivElement;
 
 // ---------------------------------------------------------------------------
 // State
@@ -214,6 +223,64 @@ function setStatus(msg: string, kind: 'info' | 'ok' | 'err' = 'info'): void {
   statusEl.classList.remove('ok', 'err');
   if (kind === 'ok') statusEl.classList.add('ok');
   if (kind === 'err') statusEl.classList.add('err');
+}
+
+// ---------------------------------------------------------------------------
+// Scale picker -- updates MAPPING live and resets the hysteresis snap so
+// the pitch re-anchors cleanly to the new scale's notes.
+// ---------------------------------------------------------------------------
+function installScalePickers(): void {
+  scaleNameSel.value = MAPPING.scale.name;
+  scaleRootSel.value = String(MAPPING.scale.root);
+
+  scaleNameSel.addEventListener('change', () => {
+    MAPPING.scale.name = scaleNameSel.value as ScaleName;
+    lastSnappedMidi = null;
+    snapStableFrames = 0;
+    console.log(`[vocoder] scale -> ${MAPPING.scale.name}`);
+  });
+  scaleRootSel.addEventListener('change', () => {
+    MAPPING.scale.root = Number(scaleRootSel.value);
+    lastSnappedMidi = null;
+    snapStableFrames = 0;
+    console.log(`[vocoder] root -> ${NOTE_NAMES[MAPPING.scale.root]}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Meter panel -- live, human-readable state. Called each frame.
+// ---------------------------------------------------------------------------
+function updateMeters(): void {
+  // Gate
+  meterGate.textContent = gateOpen ? 'OPEN' : 'closed';
+  meterGate.classList.toggle('on', gateOpen);
+  meterGate.classList.toggle('off', !gateOpen);
+
+  // Note
+  if (lastRightFeatures && lastSnappedMidi !== null) {
+    const hz = midiToHz(lastSnappedMidi);
+    meterNote.textContent = `${midiName(lastSnappedMidi)}  ${hz.toFixed(0)}Hz`;
+  } else {
+    meterNote.textContent = '—';
+  }
+
+  // Chord
+  if (lastSnappedMidi !== null) {
+    const chordMidis = chordFromScale(
+      lastSnappedMidi,
+      lastChordSize,
+      currentScale(),
+      MAPPING.scale.root,
+    );
+    meterChord.textContent = `${lastChordSize}v · ${chordMidis.map(midiName).join(' ')}`;
+  } else {
+    meterChord.textContent = '—';
+  }
+
+  // Wet bar
+  meterWet.style.width = `${Math.round(lastWetLevel * 100)}%`;
+  // Reverb bar
+  meterReverb.style.width = `${Math.round(lastReverbSend * 100)}%`;
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +534,7 @@ function renderLoop(): void {
     // (after stabilizer expires) driveAudio's `rightIdx < 0` branch
     // explicitly skips setFrequency.
     driveAudio(stable.landmarks, stable.handedness);
+    updateMeters();
     updateDebug(stable.landmarks, stable.handedness);
   }
 
@@ -809,6 +877,7 @@ function updateDebug(
 // ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
+installScalePickers();
 startBtn.addEventListener('click', () => {
   void start();
 });

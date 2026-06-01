@@ -1,26 +1,31 @@
 // ============================================================================
-// masterFx.ts -- master output chain (Phase 4 stub, completed in Phase 5).
+// masterFx.ts -- master output chain (complete after Phase 5).
 // ----------------------------------------------------------------------------
-// Sits between the vocoder and the destination. Its job is the wet/dry
-// crossfade between the VOCODED signal and the DRY CARRIER, plus a reverb
-// send/return that Phase 5 will populate.
+// Sits between the vocoder and the destination. Responsibilities:
 //
-// Topology today:
+//   - Wet/dry crossfade between the VOCODED signal and the DRY CARRIER
+//     (driven by left-hand openness via main.ts).
+//   - Convolver reverb with a synthesized exponential-decay noise IR
+//     (driven by two-hand distance).
+//   - Final brickwall limiter on the SUMMED output. The vocoder's internal
+//     limiter only catches the vocoded path; this one catches dry carrier
+//     and reverb-tail peaks too.
 //
-//   vocoder.output ──> vocodedIn ──> wetGain ─┐
-//                                              ├─> output ──> destination
-//   carrier.output ──> dryCarrierIn ──> dryGain ─┘
-//                                              ↑
-//                                              │  reverbSendGain (Phase 5
-//                                              │  will tap pre-output here
-//                                              │  to feed a ConvolverNode and
-//                                              │  sum the wet return back in)
+// Topology:
 //
-// The wet/dry sum is linear (not equal-power) for simplicity. A `dryCarrierTrim`
-// factor scales the carrier's contribution because its un-vocoded level
-// (saw + square + noise stack across N voices) is much hotter than the
-// post-compressor vocoded signal -- without trim, a 50/50 mix would be
-// drowned by the carrier.
+//   vocodedIn   ──► wetGain ───┐
+//                              ├──► preLimitSum ──► limiter ──► output
+//   dryCarrierIn ──► dryGain ──┤
+//                              │
+//   wetGain ──► reverbSend ──► Convolver ──► reverbReturn ──► preLimitSum
+//   dryGain ──► reverbSend ───┘                                ▲
+//                                                              │
+//                                                            (sum)
+//
+// Reverb send taps the PRE-mix signals (wetGain + dryGain outputs) so the
+// reverb hears whatever the user's current mix is, but the dry/wet
+// FADE STILL APPLIES TO THE DRY PATH ONLY -- reverb tail is unaffected
+// by openness. This keeps the reverb feel consistent as you blend.
 // ============================================================================
 
 export interface MasterFXOptions {
@@ -31,11 +36,26 @@ export interface MasterFXOptions {
   dryCarrierTrim?: number;
   /** Initial wet level in [0,1] (1 = full vocoded, 0 = full dry carrier). */
   initialWet?: number;
+  /** Reverb impulse-response duration in seconds. */
+  reverbDurationSec?: number;
+  /**
+   * Reverb decay exponent. The envelope is (1 - t)^decay; higher = faster
+   * decay (drier feel). 1 = linear, 2.5 = small/medium room, 4+ = tight.
+   */
+  reverbDecay?: number;
+  /** Reverb return gain (level of the wet reverb tail). */
+  reverbReturnGain?: number;
+  /** Master peak limiter threshold (dBFS). -1 = just below clipping. */
+  limiterThresholdDb?: number;
 }
 
 const DEFAULTS: Required<MasterFXOptions> = {
   dryCarrierTrim: 0.3,
   initialWet: 1.0,
+  reverbDurationSec: 1.6,
+  reverbDecay: 2.5,
+  reverbReturnGain: 0.55,
+  limiterThresholdDb: -1,
 };
 
 export class MasterFX {
@@ -44,14 +64,17 @@ export class MasterFX {
   readonly vocodedIn: GainNode;
   /** Connect the dry carrier signal here (parallel tap from CarrierSynth). */
   readonly dryCarrierIn: GainNode;
-  /** Final summed output. Connect this to destination. */
+  /** Final summed + limited output. Connect this to destination. */
   readonly output: GainNode;
 
   private readonly opts: Required<MasterFXOptions>;
   private readonly wetGain: GainNode;
   private readonly dryGain: GainNode;
-  /** Phase 5 reverb send level. Currently routes nowhere; just stored. */
+  private readonly preLimitSum: GainNode;
   private readonly reverbSendGain: GainNode;
+  private readonly reverbReturnGain: GainNode;
+  private readonly convolver: ConvolverNode;
+  private readonly limiter: DynamicsCompressorNode;
   private currentWet: number;
 
   constructor(ctx: AudioContext, opts: MasterFXOptions = {}) {
@@ -59,27 +82,59 @@ export class MasterFX {
     this.opts = { ...DEFAULTS, ...opts };
     this.currentWet = this.opts.initialWet;
 
+    // --- Input/output hubs ----------------------------------------------
     this.vocodedIn = ctx.createGain();
-    this.vocodedIn.gain.value = 1;
     this.dryCarrierIn = ctx.createGain();
-    this.dryCarrierIn.gain.value = 1;
     this.output = ctx.createGain();
-    this.output.gain.value = 1;
 
+    // --- Wet/dry pair (left-hand openness drives setWetDry) -------------
     this.wetGain = ctx.createGain();
     this.wetGain.gain.value = this.opts.initialWet;
     this.dryGain = ctx.createGain();
     this.dryGain.gain.value = (1 - this.opts.initialWet) * this.opts.dryCarrierTrim;
 
-    this.vocodedIn.connect(this.wetGain).connect(this.output);
-    this.dryCarrierIn.connect(this.dryGain).connect(this.output);
+    // --- Sum bus ---------------------------------------------------------
+    this.preLimitSum = ctx.createGain();
+    this.preLimitSum.gain.value = 1;
 
-    // Phase 5 placeholder. The reverb send sits in the audio graph but
-    // doesn't route anywhere yet. When Phase 5 wires a ConvolverNode, the
-    // chain becomes:
-    //   vocodedIn -> reverbSendGain -> ConvolverNode -> reverbReturnGain -> output
+    this.vocodedIn.connect(this.wetGain).connect(this.preLimitSum);
+    this.dryCarrierIn.connect(this.dryGain).connect(this.preLimitSum);
+
+    // --- Reverb: send -> convolver -> return -----------------------------
+    // ConvolverNode does normalized FFT convolution. Synthesized IR is
+    // stereo exponential-decay white noise -- cheap, plausible-sounding
+    // small-room reverb without shipping a wav file.
+    this.convolver = ctx.createConvolver();
+    this.convolver.buffer = createReverbIR(
+      ctx,
+      this.opts.reverbDurationSec,
+      this.opts.reverbDecay,
+    );
+
     this.reverbSendGain = ctx.createGain();
-    this.reverbSendGain.gain.value = 0;
+    this.reverbSendGain.gain.value = 0; // setReverbSend ramps from here
+    this.reverbReturnGain = ctx.createGain();
+    this.reverbReturnGain.gain.value = this.opts.reverbReturnGain;
+
+    // Tap the wet AND dry gains for the reverb send. No feedback risk:
+    // the only signal in is wetGain/dryGain (post-mix), the only signal
+    // out is reverbReturn -> preLimitSum.
+    this.wetGain.connect(this.reverbSendGain);
+    this.dryGain.connect(this.reverbSendGain);
+    this.reverbSendGain.connect(this.convolver);
+    this.convolver.connect(this.reverbReturnGain).connect(this.preLimitSum);
+
+    // --- Master brickwall limiter ---------------------------------------
+    // Catches summed peaks across vocoded + dry + reverb tail. The
+    // vocoder's internal limiter only sees its own output, so this is
+    // the *only* limiter the dry-carrier path passes through.
+    this.limiter = ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = this.opts.limiterThresholdDb;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.001;
+    this.limiter.release.value = 0.05;
+    this.preLimitSum.connect(this.limiter).connect(this.output);
   }
 
   /**
@@ -95,7 +150,7 @@ export class MasterFX {
     this.dryGain.gain.setTargetAtTime(d, t, 0.02);
   }
 
-  /** Reverb send level (0..1). Phase 5 will route this to a ConvolverNode. */
+  /** Reverb send level (0..1). Now actually routes to the convolver. */
   setReverbSend(level: number): void {
     const l = Math.max(0, Math.min(1, level));
     this.reverbSendGain.gain.setTargetAtTime(l, this.ctx.currentTime, 0.05);
@@ -108,4 +163,34 @@ export class MasterFX {
   get reverbSendLevel(): number {
     return this.reverbSendGain.gain.value;
   }
+
+  /** Current limiter gain reduction in dB (positive number = reduction amount). */
+  get limiterReductionDb(): number {
+    return -this.limiter.reduction;
+  }
+}
+
+/**
+ * Synthesize a stereo exponential-decay white-noise impulse response.
+ *
+ * Envelope: env(t) = (1 - t)^decay, where t in [0,1] over the buffer length.
+ * Channels use independent random noise so the reverb tail is decorrelated
+ * (gives a wide, immersive sound on stereo systems / headphones).
+ */
+function createReverbIR(
+  ctx: AudioContext,
+  durationSec: number,
+  decay: number,
+): AudioBuffer {
+  const length = Math.max(1, Math.floor(ctx.sampleRate * durationSec));
+  const buffer = ctx.createBuffer(2, length, ctx.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = buffer.getChannelData(ch);
+    for (let i = 0; i < length; i++) {
+      const t = i / length;
+      const env = Math.pow(1 - t, decay);
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+  }
+  return buffer;
 }

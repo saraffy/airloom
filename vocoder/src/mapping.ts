@@ -187,6 +187,10 @@ export const MAPPING: Mapping = {
   masterFx: {
     dryCarrierTrim: 0.3,
     initialWet: 1.0,
+    reverbDurationSec: 1.6,       // small-medium room tail
+    reverbDecay: 2.5,
+    reverbReturnGain: 0.55,
+    limiterThresholdDb: -1,
   },
   smoothing: {
     // Hand tracking runs at 30 fps with notable per-frame jitter.
