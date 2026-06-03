@@ -53,6 +53,7 @@ import {
 } from './audio/scales';
 import { MAPPING, currentScale } from './mapping';
 import { OneEuroFilter, mapRange } from './smoothing';
+import { ChordMap } from './chordMap';
 
 // ---------------------------------------------------------------------------
 // LATENCY KNOBS
@@ -82,6 +83,7 @@ const SAMPLE_RATE_STRATEGY: 'output' | 'mic' | 'default' = 'output';
 const video = document.getElementById('video') as HTMLVideoElement;
 const canvas = document.getElementById('overlay') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
+const stageEl = canvas.parentElement as HTMLElement;
 const startBtn = document.getElementById('start-btn') as HTMLButtonElement;
 const statusEl = document.getElementById('status') as HTMLDivElement;
 const debugEl = document.getElementById('debug') as HTMLPreElement;
@@ -128,6 +130,17 @@ let smoothHandDistance: OneEuroFilter | null = null;
 // 1 = full triad. Smoothed by the one-euro filter so it doesn't zipper.
 let lastDensity = 0;
 let lastReverbSend = 0;
+// Continuous (pre-snap) MIDI value of the right hand. Used by the
+// on-screen chord map to position its hand marker between rungs.
+let lastRawMidi: number | null = null;
+// Whether the right hand was visible in the most-recently-processed
+// detection frame -- distinct from the master mode (which lingers during
+// the hangover). The chord-map marker is only shown when this is true.
+let rightHandVisibleNow = false;
+
+// The on-screen chord ladder. Built lazily on first start() so the DOM
+// is ready, and rebuilt whenever the user changes scale or key.
+let chordMap: ChordMap | null = null;
 // Cached features per side for debug + audio.
 let lastLeftFeatures: HandFeatures | null = null;
 // Two parallel gain switches between the mic and the vocoder modulator
@@ -256,19 +269,44 @@ function installScalePickers(): void {
     MAPPING.scale.name = scaleNameSel.value as ScaleName;
     lastSnappedMidi = null;
     snapStableFrames = 0;
+    rebuildChordMap();
     console.log(`[vocoder] scale -> ${MAPPING.scale.name}`);
   });
   scaleRootSel.addEventListener('change', () => {
     MAPPING.scale.root = Number(scaleRootSel.value);
     lastSnappedMidi = null;
     snapStableFrames = 0;
+    rebuildChordMap();
     console.log(`[vocoder] root -> ${NOTE_NAMES[MAPPING.scale.root]}`);
   });
+}
+
+function rebuildChordMap(): void {
+  if (!chordMap) return;
+  chordMap.rebuild(
+    MAPPING.pitch.midiLow,
+    MAPPING.pitch.midiHigh,
+    currentScale(),
+    MAPPING.scale.root,
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Meter panel -- live, human-readable state. Called each frame.
 // ---------------------------------------------------------------------------
+function updateChordMap(): void {
+  if (!chordMap) return;
+  chordMap.update({
+    snappedMidi: lastSnappedMidi,
+    // Only show the raw-position marker while the right hand is actually
+    // visible right now (during hangover we have no fresh hand y so the
+    // marker would lie about where the hand is).
+    rawMidi: rightHandVisibleNow ? lastRawMidi : null,
+    density: lastDensity,
+    audible: masterMode !== 'silence',
+  });
+}
+
 function updateMeters(): void {
   // Mode (was "Gate" - now tri-state: ROBOT / CLEAN / silent)
   meterGate.classList.remove('on', 'off', 'on-clean');
@@ -356,6 +394,13 @@ async function start(): Promise<void> {
     setStatus('Loading hand-landmark model…');
     tracker = await createHandTracker();
     stabilizer = createHandStabilizer(MAPPING.handStickyFrames);
+
+    // Build the on-screen chord ladder. The dropdowns trigger rebuild()
+    // when scale or key changes; nothing else can change the ladder.
+    if (!chordMap) {
+      chordMap = new ChordMap(stageEl);
+    }
+    rebuildChordMap();
 
     // Surface the ground-truth delegate + any MediaPipe init warnings
     // (especially "GPU init failed" / "falling back to CPU" style lines).
@@ -605,6 +650,7 @@ function renderLoop(): void {
     // explicitly skips setFrequency.
     driveAudio(stable.landmarks, stable.handedness);
     updateMeters();
+    updateChordMap();
     updateDebug(stable.landmarks, stable.handedness);
   }
 
@@ -712,6 +758,7 @@ function driveAudio(
   // is unchanged; chord voicing comes from chordSize above.
   // -----------------------------------------------------------------------
   if (rightIdx < 0) {
+    rightHandVisibleNow = false;
     if (trackingLostSinceT === null) trackingLostSinceT = now;
     const lostMs = now - trackingLostSinceT;
 
@@ -725,6 +772,7 @@ function driveAudio(
     return;
   }
 
+  rightHandVisibleNow = true;
   trackingLostSinceT = null;
 
   const f = extractFeatures(hands[rightIdx]!);
@@ -739,6 +787,7 @@ function driveAudio(
   const yClamped = clamp(smY, yDeadZone, 1 - yDeadZone);
   const yNorm = (yClamped - yDeadZone) / (1 - 2 * yDeadZone);
   const rawMidi = midiHigh - yNorm * (midiHigh - midiLow);
+  lastRawMidi = rawMidi;
   const snapped = quantizeToScaleHysteresis(
     rawMidi,
     lastSnappedMidi,

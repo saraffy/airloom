@@ -70,6 +70,89 @@ header h1 {
   display: block;
 }
 
+/* --- Chord-map overlay ---------------------------------------------- */
+.chord-map {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 92px;
+  /* Soft gradient so the overlay reads against the camera without fully
+     blocking it. */
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(8, 10, 14, 0.45) 30%,
+    rgba(8, 10, 14, 0.65) 100%
+  );
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+}
+.chord-map-rungs {
+  position: relative;
+  height: 100%;
+}
+.chord-map-rung {
+  position: absolute;
+  right: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 0 10px;
+  font-size: 0.72rem;
+  color: rgba(230, 234, 240, 0.45);
+  letter-spacing: 0.02em;
+  /* Center the rung on its target y. */
+  transform: translateY(-50%);
+  transition: color 0.08s linear, font-size 0.08s linear;
+  white-space: nowrap;
+}
+.chord-map-rung .rung-tick {
+  display: inline-block;
+  width: 10px;
+  height: 1px;
+  background: rgba(230, 234, 240, 0.3);
+  transition: width 0.08s linear, height 0.08s linear, background 0.08s linear;
+}
+.chord-map-rung .rung-root {
+  display: inline-block;
+}
+.chord-map-rung .rung-suffix {
+  display: inline-block;
+  opacity: 1;
+  margin-left: 1px;
+  transition: opacity 0.08s linear;
+}
+.chord-map-rung.active {
+  color: var(--accent);
+  font-size: 0.94rem;
+  font-weight: 700;
+  text-shadow: 0 0 8px rgba(94, 224, 164, 0.45);
+}
+.chord-map-rung.active .rung-tick {
+  width: 18px;
+  height: 2px;
+  background: var(--accent);
+}
+/* For the active rung, .rung-suffix opacity is set inline from density. */
+
+.chord-map-marker {
+  position: absolute;
+  right: 0;
+  width: 30px;
+  height: 0;
+  border-top: 2px solid rgba(94, 224, 164, 0.7);
+  transform: translateY(-50%);
+  pointer-events: none;
+  transition: top 0.05s linear;
+}
+.chord-map-marker.hidden {
+  display: none;
+}
+
 .controls {
   display: flex;
   flex-direction: column;
