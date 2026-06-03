@@ -194,6 +194,52 @@ button#start-btn:disabled {
   opacity: 0.7;
 }
 
+button#record-btn {
+  background: #2a2d35;
+  color: var(--fg);
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, transform 0.05s ease;
+}
+button#record-btn:hover:not(:disabled) {
+  background: #353944;
+}
+button#record-btn:active {
+  transform: translateY(1px);
+}
+button#record-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+button#record-btn.recording {
+  background: #d94d4d;
+  color: white;
+}
+button#record-btn.recording:hover {
+  background: #e85d5d;
+}
+
+.record-timer {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #ff6b6b;
+  letter-spacing: 0.04em;
+  /* Soft pulse so the recording indicator is unmissable. */
+  animation: recording-pulse 1.2s ease-in-out infinite;
+}
+.record-timer.hidden {
+  display: none;
+}
+@keyframes recording-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
 .status {
   flex: 1 1 200px;
   color: var(--muted);

@@ -54,6 +54,7 @@ import {
 import { MAPPING, currentScale } from './mapping';
 import { OneEuroFilter, mapRange } from './smoothing';
 import { ChordMap } from './chordMap';
+import { createRecorder, type RecorderHandle } from './recorder';
 
 // ---------------------------------------------------------------------------
 // LATENCY KNOBS
@@ -89,6 +90,8 @@ const statusEl = document.getElementById('status') as HTMLDivElement;
 const debugEl = document.getElementById('debug') as HTMLPreElement;
 const scaleNameSel = document.getElementById('scale-name') as HTMLSelectElement;
 const scaleRootSel = document.getElementById('scale-root') as HTMLSelectElement;
+const recordBtn = document.getElementById('record-btn') as HTMLButtonElement;
+const recordTimer = document.getElementById('record-timer') as HTMLSpanElement;
 const meterGate = document.getElementById('meter-gate') as HTMLDivElement;
 const meterNote = document.getElementById('meter-note') as HTMLDivElement;
 const meterChord = document.getElementById('meter-chord') as HTMLDivElement;
@@ -141,6 +144,9 @@ let rightHandVisibleNow = false;
 // The on-screen chord ladder. Built lazily on first start() so the DOM
 // is ready, and rebuilt whenever the user changes scale or key.
 let chordMap: ChordMap | null = null;
+
+// Recorder. Lazily created on first start() so the AudioContext exists.
+let recorder: RecorderHandle | null = null;
 // Cached features per side for debug + audio.
 let lastLeftFeatures: HandFeatures | null = null;
 // Two parallel gain switches between the mic and the vocoder modulator
@@ -546,6 +552,26 @@ async function start(): Promise<void> {
     // the vocoded signal flows whenever MasterFX wants it.
     vocoder.setGate(true);
 
+    // Wire up the recorder. The audio tap is a parallel connection off
+    // masterFx.output to a MediaStreamAudioDestination -- live audio
+    // path through audioCtx.destination is untouched. Canvas video is
+    // captured via canvas.captureStream(30); ChordMap.drawToCanvas in
+    // the render loop ensures the chord ladder appears in the recording.
+    if (!recorder) {
+      recorder = createRecorder({
+        canvas,
+        audioSource: masterFx.output,
+        audioCtx,
+        recordBtn,
+        recordTimer,
+        onStatus: setStatus,
+      });
+      recordBtn.disabled = false;
+      recordBtn.addEventListener('click', () => {
+        recorder?.toggle();
+      });
+    }
+
     installNoiseGateToggle();
 
     // Surface the actual platform latency once everything is wired.
@@ -662,6 +688,19 @@ function renderLoop(): void {
   // the conditional above.
   if (lastStable) {
     drawDetections(lastStable.landmarks, lastStable.handedness, lastStable.ages);
+  }
+
+  // Paint the chord ladder onto the canvas as well. The DOM overlay sits
+  // visually on top (so live viewing keeps the styled HTML look), but
+  // canvas.captureStream() only sees pixels -- this is what makes the
+  // chord map appear in recordings.
+  if (chordMap) {
+    chordMap.drawToCanvas(ctx, {
+      snappedMidi: lastSnappedMidi,
+      rawMidi: rightHandVisibleNow ? lastRawMidi : null,
+      density: lastDensity,
+      audible: masterMode !== 'silence',
+    });
   }
 
   frameCount += 1;
