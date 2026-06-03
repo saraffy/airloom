@@ -17,29 +17,34 @@
 //
 // Topology:
 //
-//   vocodedIn    ──► wetGain ───┐
-//                               ├──► preLimitSum ──► voxOutGain ──┐
-//   dryCarrierIn ──► dryGain ───┤                                  │
-//                                                                  ├──► limiter ──► output
-//   voiceBlendIn ──► voiceBlendGain ──► preLimitSum                │
-//                                                                  │
-//   cleanVoiceIn ──► cleanVoxGain ─────────────────────────────────┘
+//   vocodedIn    ──► wetGain ───┬─► preLimitSum ──► voxOutGain ─────────┐
+//   dryCarrierIn ──► dryGain ───┤                                        │
+//   voiceBlendIn ──► voiceBlendGain ──► preLimitSum                      │
+//                                                                        ├─► limiter ──► output
+//                wetGain ─┐                                               │
+//                dryGain ─┴─► robotReverbTap ─┐                           │
+//                                              ├─► reverbSendGain ─► ... ─► reverbReturnGain ──┘
+//                            cleanVoxGain ────┘                              (parallel
+//                                                                             into limiter)
+//   cleanVoiceIn ──► cleanVoxGain ─────────────────────────────────────────┘
 //
-//   wetGain/dryGain ──► reverbSend ──► Convolver ──► reverbReturn ──► preLimitSum
+// Two SEND taps into the reverb:
+//   - robotReverbTap  -- sums wetGain+dryGain (NOT voiceBlend, which stays
+//                        dry by design), then scales by a mode-driven gain
+//                        that mirrors voxOutGain. So robot signal only
+//                        reaches the reverb when robot mode is active.
+//   - cleanVoxGain    -- already mode-gated by the existing cleanVoxGain
+//                        switch. Tap is POST that gain so clean signal
+//                        only reaches the reverb when clean mode is active.
 //
-// The wet/dry crossfade applies to the DRY CARRIER blend only.
+// The reverb RETURN goes directly to the master limiter, in parallel with
+// the dry post-mode signals. This is what lets clean reverb survive in
+// pinched mode -- previously the return was on preLimitSum, which got
+// silenced by voxOutGain whenever you weren't in robot mode.
 //
-// Two distinct mic taps:
-//   - voiceBlendIn  -- mixed into the ROBOT path (preLimitSum), so it only
-//                      sounds when voxOutGain is up (= unpinched). Used to
-//                      blend natural voice on top of the vocoded carrier.
-//   - cleanVoiceIn  -- routed through cleanVoxGain in parallel to the
-//                      limiter, so it ONLY sounds when setMode('cleanVoice')
-//                      is active (= pinched). Used for clean monitoring.
-//
-// Because voxOutGain and cleanVoxGain are mutually exclusive (driven by
-// setMode), the voice blend is automatically restricted to robot mode --
-// no extra routing logic needed.
+// voiceBlend is intentionally excluded from both reverb taps -- it joins
+// preLimitSum directly, so it gets the same mode crossfade as the other
+// dry signals but never reverberates.
 // ============================================================================
 
 export type MasterMode = 'robot' | 'cleanVoice' | 'silence';
@@ -151,12 +156,18 @@ export class MasterFX {
   private readonly shortPathGain: GainNode;
   private readonly longPathGain: GainNode;
   private readonly limiter: DynamicsCompressorNode;
-  /** Master mute for the entire vocoded/dry-carrier/reverb mix. */
+  /** Master mute for the vocoded + dry-carrier sum (robot path's DRY signal). */
   private readonly voxOutGain: GainNode;
   /** Master mute for the clean-voice monitor path. */
   private readonly cleanVoxGain: GainNode;
   /** Voice-blend amount (mic into robot path); controlled by setVoiceBlend. */
   private readonly voiceBlendGain: GainNode;
+  /**
+   * Mode-driven gate on the ROBOT reverb send. Mirrors voxOutGain so the
+   * robot signal only reaches the convolvers when in robot mode -- prevents
+   * the robot tail from leaking into pinched (clean) mode.
+   */
+  private readonly robotReverbTap: GainNode;
   private currentWet: number;
   private currentMode: MasterMode = 'silence';
 
@@ -185,12 +196,12 @@ export class MasterFX {
     this.vocodedIn.connect(this.wetGain).connect(this.preLimitSum);
     this.dryCarrierIn.connect(this.dryGain).connect(this.preLimitSum);
 
-    // --- Reverb: send -> [short || long] -> return -----------------------
+    // --- Reverb: [robot tap + clean tap] -> [short || long] -> return ----
     // Two ConvolverNodes in parallel, each with its own exponential-decay
     // synthesized IR. shortPathGain and longPathGain crossfade between
-    // them so the TAIL LENGTH (not just wet level) grows with distance.
-    // ConvolverNode does normalized FFT convolution -- cheap, plausible
-    // reverb without shipping wavs.
+    // them so the TAIL LENGTH grows with distance. ConvolverNode does
+    // normalized FFT convolution -- cheap, plausible reverb without
+    // shipping wavs.
     this.convolverShort = ctx.createConvolver();
     this.convolverShort.buffer = createReverbIR(
       ctx,
@@ -209,6 +220,16 @@ export class MasterFX {
     this.reverbReturnGain = ctx.createGain();
     this.reverbReturnGain.gain.value = this.opts.reverbReturnGain;
 
+    // Mode-driven gate on the robot reverb send. Starts at 0 (silence
+    // mode); setMode ramps it to robotLevel when robot mode engages and
+    // back to 0 when leaving robot. Excludes voiceBlend (voiceBlend
+    // connects to preLimitSum directly, NOT to robotReverbTap).
+    this.robotReverbTap = ctx.createGain();
+    this.robotReverbTap.gain.value = 0;
+    this.wetGain.connect(this.robotReverbTap);
+    this.dryGain.connect(this.robotReverbTap);
+    this.robotReverbTap.connect(this.reverbSendGain);
+
     // Path-crossfade gains: setTailLength ramps shortPathGain = 1-t,
     // longPathGain = t. Linear crossfade -- at t=0.5 both are 0.5 so the
     // user hears a blended IR.
@@ -217,18 +238,16 @@ export class MasterFX {
     this.longPathGain = ctx.createGain();
     this.longPathGain.gain.value = 0;
 
-    // Tap the wet AND dry gains for the reverb send (post-mix). No feedback
-    // risk: the only signals in are wetGain/dryGain, the only signal out
-    // is reverbReturn -> preLimitSum.
-    this.wetGain.connect(this.reverbSendGain);
-    this.dryGain.connect(this.reverbSendGain);
-
     // Send -> per-path gain -> convolver -> common return.
     this.reverbSendGain.connect(this.shortPathGain).connect(this.convolverShort);
     this.reverbSendGain.connect(this.longPathGain).connect(this.convolverLong);
     this.convolverShort.connect(this.reverbReturnGain);
     this.convolverLong.connect(this.reverbReturnGain);
-    this.reverbReturnGain.connect(this.preLimitSum);
+    // Reverb return goes DIRECTLY to the limiter (not preLimitSum). This
+    // is what lets clean-mode reverb survive past voxOutGain's mute.
+    // Per-path send gates (robotReverbTap, cleanVoxGain) already ensure
+    // that only the currently-audible signal feeds the convolvers, so
+    // the bypass of preLimitSum doesn't cause cross-mode leakage.
 
     // --- Voice-blend: mic INTO the robot mix ---------------------------
     // Lands on preLimitSum so it's subject to voxOutGain (only audible
@@ -249,6 +268,9 @@ export class MasterFX {
     this.cleanVoxGain = ctx.createGain();
     this.cleanVoxGain.gain.value = 0;
     this.cleanVoiceIn.connect(this.cleanVoxGain);
+    // Clean reverb tap: POST cleanVoxGain so the clean signal only
+    // reaches the reverb when clean (pinched) mode is active.
+    this.cleanVoxGain.connect(this.reverbSendGain);
 
     // --- Master brickwall limiter ---------------------------------------
     // Catches summed peaks across vocoded + dry + reverb tail AND the
@@ -261,6 +283,10 @@ export class MasterFX {
     this.limiter.release.value = 0.05;
     this.voxOutGain.connect(this.limiter);
     this.cleanVoxGain.connect(this.limiter);
+    // Reverb wet return joins the limiter in parallel with the dry
+    // post-mode signals -- the master limiter is the brickwall for the
+    // summed (dry + reverb tail) signal.
+    this.reverbReturnGain.connect(this.limiter);
     this.limiter.connect(this.output);
   }
 
@@ -310,9 +336,13 @@ export class MasterFX {
     const tc = this.opts.modeXfadeSec;
     let voxTarget = 0;
     let cleanTarget = 0;
+    let robotReverbTarget = 0;
     switch (mode) {
       case 'robot':
         voxTarget = this.opts.robotLevel;
+        // robotReverbTap mirrors voxOutGain so the robot reverb send is
+        // gated by mode the same way the dry signal is.
+        robotReverbTarget = this.opts.robotLevel;
         break;
       case 'cleanVoice':
         cleanTarget = this.opts.cleanVoiceLevel;
@@ -322,6 +352,7 @@ export class MasterFX {
     }
     this.voxOutGain.gain.setTargetAtTime(voxTarget, t, tc);
     this.cleanVoxGain.gain.setTargetAtTime(cleanTarget, t, tc);
+    this.robotReverbTap.gain.setTargetAtTime(robotReverbTarget, t, tc);
   }
 
   /**
