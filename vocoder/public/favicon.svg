@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- airloom favicon: dark charcoal tile with 4 vertical multicolored
+       loom threads. Bars span the middle ~55% of the tile, rounded ends,
+       even gaps. No letters; this is the brand mark. -->
+  <rect width="64" height="64" fill="#2c2925" />
+  <rect x="10" y="14.5" width="8" height="35" rx="4" fill="#6b8cae" />
+  <rect x="22" y="14.5" width="8" height="35" rx="4" fill="#c87a5b" />
+  <rect x="34" y="14.5" width="8" height="35" rx="4" fill="#8a9b6e" />
+  <rect x="46" y="14.5" width="8" height="35" rx="4" fill="#cfa24a" />
+</svg>
