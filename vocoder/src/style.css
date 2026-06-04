@@ -7,6 +7,14 @@
   --accent-dim: #2a8d63;
   --danger: #ff6b6b;
   --radius: 10px;
+
+  /* Airloom brand palette (used by the landing + brand header strip). */
+  --parchment-top: #f7f4ee;
+  --parchment-bottom: #ece5d9;
+  --charcoal: #2c2925;
+  --warm-gray: #8a8377;
+  --warm-gray-faint: #a59e92;
+
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
@@ -29,16 +37,209 @@ html, body {
   gap: 20px;
 }
 
-header h1 {
-  margin: 0 0 4px;
-  font-size: 1.6rem;
-  letter-spacing: 0.02em;
+/* --- Brand header strip (parchment band on top of the instrument view) --- */
+.app-header {
+  background: linear-gradient(to bottom, var(--parchment-top), var(--parchment-bottom));
+  padding: 14px 28px;
+  border-bottom: 1px solid rgba(44, 41, 37, 0.08);
+  display: flex;
+  align-items: center;
+}
+.app-wordmark {
+  font-family: 'Outfit', system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 1.05rem;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  color: var(--charcoal);
+  text-transform: lowercase;
 }
 
-.subtitle {
+/* The landing replaces this button. Hidden, but kept in the DOM so
+   main.ts's existing #start-btn handler stays valid as a fallback. */
+#start-btn {
+  display: none;
+}
+
+/* =========================================================================
+   LANDING PAGE
+   ========================================================================= */
+
+.landing {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: linear-gradient(to bottom, var(--parchment-top), var(--parchment-bottom));
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Outfit', system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Slow ease-out on the fade so the landing dissolves rather than snaps. */
+  transition: opacity 0.65s ease-out;
+}
+.landing.dismissed {
+  opacity: 0;
+  pointer-events: none;
+}
+/* After the fade completes, drop the element out of the layout tree so
+   no CSS animations keep running in the background. */
+.landing.gone {
+  display: none;
+}
+
+/* --- Loom: vertical SVG threads spanning the viewport ------------------ */
+.loom {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.thread {
+  stroke: #6b8cae;
+  stroke-width: 0.9;
+  /* Keep the visual stroke a constant px regardless of the viewBox stretch. */
+  vector-effect: non-scaling-stroke;
+  opacity: 0.4;
+  /* Three loops composed in one shorthand. Per-thread `animation-delay`
+     (set inline on each <line>) drives the stagger so the colors flow
+     across the loom like a slow wave rather than changing in unison. */
+  animation:
+    thread-sway 9s ease-in-out infinite,
+    thread-color 20s linear infinite,
+    thread-shimmer 7s ease-in-out infinite;
+  /* GPU-friendly: only transform / opacity / color change. */
+  will-change: transform, opacity;
+}
+@keyframes thread-sway {
+  0%, 100% { transform: translateX(0); }
+  50%      { transform: translateX(8px); }
+}
+@keyframes thread-color {
+  /* Seven muted hues, evenly spaced around the 20s loop. */
+  0%   { stroke: #6b8cae; }   /* dusty blue */
+  14%  { stroke: #c87a5b; }   /* terracotta */
+  28%  { stroke: #8a9b6e; }   /* sage */
+  42%  { stroke: #cfa24a; }   /* ochre */
+  57%  { stroke: #9b7aa0; }   /* mauve */
+  71%  { stroke: #5a9a93; }   /* teal */
+  85%  { stroke: #c79aa8; }   /* dusty rose */
+  100% { stroke: #6b8cae; }
+}
+@keyframes thread-shimmer {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+
+/* Honor reduced-motion preferences -- keep the static look but skip
+   the loops. The page is still legible without animation. */
+@media (prefers-reduced-motion: reduce) {
+  .thread {
+    animation: none;
+    opacity: 0.4;
+  }
+  .landing {
+    transition: opacity 0.2s ease;
+  }
+}
+
+/* --- Halo behind the wordmark so the threads visually mute under text -- */
+.landing-halo {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 38% 32% at center,
+    rgba(247, 244, 238, 0.92) 0%,
+    rgba(247, 244, 238, 0.7) 35%,
+    rgba(247, 244, 238, 0) 100%
+  );
+  pointer-events: none;
+}
+
+/* --- Centered text + button --------------------------------------------- */
+.landing-content {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  max-width: 520px;
+  padding: 20px;
+}
+.wordmark {
   margin: 0;
-  color: var(--muted);
+  font-family: inherit;
+  font-size: clamp(2.5rem, 7vw, 4.25rem);
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  color: var(--charcoal);
+  text-transform: lowercase;
+  line-height: 1;
+}
+.wordmark-hairline {
+  width: 56px;
+  height: 1px;
+  margin: 6px 0 4px;
+  background: var(--charcoal);
+  opacity: 0.22;
+}
+.tagline {
+  margin: 0;
+  font-family: inherit;
+  font-size: clamp(0.92rem, 1.4vw, 1.05rem);
+  font-weight: 300;
+  letter-spacing: 0.14em;
+  color: var(--warm-gray);
+  text-transform: lowercase;
+}
+
+.start-pill {
+  margin-top: 22px;
+  background: transparent;
+  border: 1px solid rgba(44, 41, 37, 0.7);
+  color: var(--charcoal);
+  font-family: inherit;
   font-size: 0.95rem;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  padding: 12px 42px;
+  border-radius: 999px;
+  cursor: pointer;
+  text-transform: lowercase;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+.start-pill:hover:not(:disabled) {
+  background: rgba(44, 41, 37, 0.06);
+  border-color: rgba(44, 41, 37, 0.9);
+}
+.start-pill:active:not(:disabled) {
+  background: rgba(44, 41, 37, 0.12);
+}
+.start-pill:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.landing-helper {
+  margin: 4px 0 0;
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 300;
+  letter-spacing: 0.1em;
+  color: var(--warm-gray-faint);
+}
+.landing-status {
+  margin: 6px 0 0;
+  min-height: 1.2em;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 300;
+  letter-spacing: 0.04em;
+  color: var(--warm-gray);
+}
+.landing-status.err {
+  color: #b35c4d;
 }
 
 .stage {

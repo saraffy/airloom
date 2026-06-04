@@ -3,16 +3,76 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Gesture Vocoder</title>
+    <title>airloom</title>
+    <!-- Outfit (Google Fonts) for the wordmark + tagline. Two weights only
+         (300 + 500) so the network cost is minimal -- this loads before
+         the camera/audio engine so we keep it tiny. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <main id="app">
-      <header>
-        <h1>Gesture Vocoder</h1>
-        <p class="subtitle">Hand-controlled voice synthesizer · right: pitch (y) + clean monitor (pinch) · left: triad density (openness) · two-hand distance: reverb</p>
-      </header>
+    <!-- =========================================================
+         LANDING -- shown on first load, fades on Start success.
+         Cream parchment background with an animated SVG loom of
+         multicolored vertical threads behind a soft halo holding
+         the wordmark, tagline, and outlined start pill.
+         ========================================================= -->
+    <div id="landing" class="landing">
+      <!-- Loom: 13 vertical threads spanning the viewport. Each thread
+           runs three loops (sway / color cycle / shimmer); per-thread
+           inline negative animation-delays stagger them so the colors
+           move across the loom like a wave instead of changing in unison. -->
+      <svg
+        class="loom"
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        aria-hidden="true"
+      >
+        <line class="thread" x1="3.85"  x2="3.85"  y1="0" y2="100" style="animation-delay: 0s, 0s, 0s" />
+        <line class="thread" x1="11.54" x2="11.54" y1="0" y2="100" style="animation-delay: -0.7s, -1.5s, -0.4s" />
+        <line class="thread" x1="19.23" x2="19.23" y1="0" y2="100" style="animation-delay: -1.4s, -3s, -0.8s" />
+        <line class="thread" x1="26.92" x2="26.92" y1="0" y2="100" style="animation-delay: -2.1s, -4.5s, -1.2s" />
+        <line class="thread" x1="34.62" x2="34.62" y1="0" y2="100" style="animation-delay: -2.8s, -6s, -1.6s" />
+        <line class="thread" x1="42.31" x2="42.31" y1="0" y2="100" style="animation-delay: -3.5s, -7.5s, -2s" />
+        <line class="thread" x1="50"    x2="50"    y1="0" y2="100" style="animation-delay: -4.2s, -9s, -2.4s" />
+        <line class="thread" x1="57.69" x2="57.69" y1="0" y2="100" style="animation-delay: -4.9s, -10.5s, -2.8s" />
+        <line class="thread" x1="65.38" x2="65.38" y1="0" y2="100" style="animation-delay: -5.6s, -12s, -3.2s" />
+        <line class="thread" x1="73.08" x2="73.08" y1="0" y2="100" style="animation-delay: -6.3s, -13.5s, -3.6s" />
+        <line class="thread" x1="80.77" x2="80.77" y1="0" y2="100" style="animation-delay: -7s, -15s, -4s" />
+        <line class="thread" x1="88.46" x2="88.46" y1="0" y2="100" style="animation-delay: -7.7s, -16.5s, -4.4s" />
+        <line class="thread" x1="96.15" x2="96.15" y1="0" y2="100" style="animation-delay: -8.4s, -18s, -4.8s" />
+      </svg>
 
+      <!-- Soft cream halo behind the centered text so the threads mute
+           against the wordmark / tagline without blocking the camera area. -->
+      <div class="landing-halo" aria-hidden="true"></div>
+
+      <div class="landing-content">
+        <h1 class="wordmark">airloom</h1>
+        <div class="wordmark-hairline" aria-hidden="true"></div>
+        <p class="tagline">weave music from air</p>
+        <button id="landing-start-btn" type="button" class="start-pill">start</button>
+        <p class="landing-helper">
+          headphones recommended · allow camera &amp; microphone
+        </p>
+        <p id="landing-status" class="landing-status" role="status"></p>
+      </div>
+    </div>
+
+    <!-- =========================================================
+         BRAND HEADER -- thin parchment strip carried into the
+         instrument view so the airloom identity persists.
+         ========================================================= -->
+    <header class="app-header">
+      <span class="app-wordmark">airloom</span>
+    </header>
+
+    <main id="app">
       <section class="stage">
         <!-- Video element receives the raw camera feed. It's hidden visually
              (we draw it into the canvas), but kept in the DOM because
@@ -25,6 +85,9 @@
 
       <section class="controls">
         <div class="control-row primary-row">
+          <!-- start-btn lives on for legacy click handler wiring; the
+               landing's button is the real entry point now and this is
+               hidden via CSS. -->
           <button id="start-btn" type="button">Start</button>
           <button id="record-btn" type="button" disabled>● Record</button>
           <span id="record-timer" class="record-timer hidden">● 0:00</span>

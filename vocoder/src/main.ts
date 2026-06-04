@@ -92,6 +92,12 @@ const scaleNameSel = document.getElementById('scale-name') as HTMLSelectElement;
 const scaleRootSel = document.getElementById('scale-root') as HTMLSelectElement;
 const recordBtn = document.getElementById('record-btn') as HTMLButtonElement;
 const recordTimer = document.getElementById('record-timer') as HTMLSpanElement;
+// Airloom landing page elements -- created in index.html and styled in
+// style.css. The landing is the real entry point now; the original
+// #start-btn is hidden and only kept for the existing handler hookup.
+const landingEl = document.getElementById('landing') as HTMLDivElement;
+const landingStartBtn = document.getElementById('landing-start-btn') as HTMLButtonElement;
+const landingStatusEl = document.getElementById('landing-status') as HTMLParagraphElement;
 const meterGate = document.getElementById('meter-gate') as HTMLDivElement;
 const meterNote = document.getElementById('meter-note') as HTMLDivElement;
 const meterChord = document.getElementById('meter-chord') as HTMLDivElement;
@@ -264,6 +270,14 @@ function setStatus(msg: string, kind: 'info' | 'ok' | 'err' = 'info'): void {
   statusEl.classList.remove('ok', 'err');
   if (kind === 'ok') statusEl.classList.add('ok');
   if (kind === 'err') statusEl.classList.add('err');
+
+  // Mirror status into the landing while it's still visible, so the
+  // user sees permission prompts / errors without having to look at
+  // the (hidden) instrument controls.
+  if (landingStatusEl) {
+    landingStatusEl.textContent = msg;
+    landingStatusEl.classList.toggle('err', kind === 'err');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,6 +1064,30 @@ function updateDebug(
 // Boot
 // ---------------------------------------------------------------------------
 installScalePickers();
+
+// Legacy fallback: the original instrument-view Start button is hidden
+// via CSS (#start-btn { display: none }), but the click handler stays
+// wired in case anyone reaches it (e.g. devtools).
 startBtn.addEventListener('click', () => {
   void start();
+});
+
+// PRIMARY ENTRY POINT: the airloom landing page's outlined start pill.
+// Calls start() (which prompts for camera + mic + sets up the audio
+// engine), then either fades the landing on success or leaves it
+// visible with the error so the user can retry.
+landingStartBtn.addEventListener('click', async () => {
+  landingStartBtn.disabled = true;
+  await start();
+  if (running) {
+    // Smooth opacity fade defined in .landing { transition: opacity ... }.
+    landingEl.classList.add('dismissed');
+    // After the fade completes, drop the element out of the layout tree
+    // entirely so its CSS animations stop running in the background.
+    window.setTimeout(() => landingEl.classList.add('gone'), 750);
+  } else {
+    // start() failed (permission denied, model load error, etc.). Let
+    // the user retry without reloading.
+    landingStartBtn.disabled = false;
+  }
 });
