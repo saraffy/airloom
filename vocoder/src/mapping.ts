@@ -109,6 +109,20 @@ export interface Mapping {
     sendMax: number;
     curveExp: number;
   };
+  /**
+   * Left-hand y -> tremolo depth. Hand HIGH on screen (small y) = deep
+   * tremolo; hand LOW (large y) = no tremolo. Linear, clamped.
+   */
+  tremolo: {
+    /** Wrist y treated as "high" on screen (depth = depthMax). */
+    yMin: number;
+    /** Wrist y treated as "low" on screen (depth = 0). */
+    yMax: number;
+    /** Max depth at the top of the range. 1.0 = full chop on each LFO trough. */
+    depthMax: number;
+    /** LFO rate in Hz. Musical tremolo lives around 4-7 Hz. */
+    rateHz: number;
+  };
   /** Pass-through options to MasterFX. */
   masterFx: MasterFXOptions;
   /**
@@ -173,6 +187,12 @@ export const MAPPING: Mapping = {
     sendMin: 0,
     sendMax: 1.0,                 // full send at max distance
     curveExp: 2.5,                // dramatic bloom: subtle mid-range, big at the ends
+  },
+  tremolo: {
+    yMin: 0.10,                   // wrist near top of frame -> deepest tremolo
+    yMax: 0.90,                   // wrist near bottom -> no tremolo
+    depthMax: 0.85,               // not quite full chop at peak; leaves a touch of signal
+    rateHz: 5.5,                  // classic musical tremolo
   },
   masterFx: {
     dryCarrierTrim: 0.3,

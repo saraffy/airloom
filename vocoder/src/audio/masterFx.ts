@@ -81,6 +81,11 @@ export interface MasterFXOptions {
   /** Master peak limiter threshold (dBFS). -1 = just below clipping. */
   limiterThresholdDb?: number;
   /**
+   * Initial LFO rate for the tremolo stage (Hz). Tunable live via
+   * setLfoRate. Typical musical tremolo: 4-7 Hz.
+   */
+  tremoloRateHz?: number;
+  /**
    * Robot-path gain when setMode('robot') is active. 1.0 is unity -- the
    * vocoder's own outputGain/makeupGain do most of the level-setting.
    */
@@ -120,6 +125,7 @@ const DEFAULTS: Required<MasterFXOptions> = {
   cleanVoiceLevel: 1.2,
   voiceBlend: 0.35,
   modeXfadeSec: 0.015,
+  tremoloRateHz: 5.5,
 };
 
 export class MasterFX {
@@ -168,6 +174,17 @@ export class MasterFX {
    * the robot tail from leaking into pinched (clean) mode.
    */
   private readonly robotReverbTap: GainNode;
+  /**
+   * Tremolo stage (after the master limiter, before output). Classic
+   * asymmetric wiring:
+   *    tremoloGain.gain.value = 1 - depth/2
+   *    LFO -> tremoloDepthGain (gain = depth/2) -> tremoloGain.gain
+   * so the signal gain oscillates between (1 - depth) and 1.
+   * depth = 0 -> LFO contribution is 0, base value is 1 -> perfectly flat.
+   */
+  private readonly lfo: OscillatorNode;
+  private readonly tremoloDepthGain: GainNode;
+  private readonly tremoloGain: GainNode;
   private currentWet: number;
   private currentMode: MasterMode = 'silence';
 
@@ -287,7 +304,30 @@ export class MasterFX {
     // post-mode signals -- the master limiter is the brickwall for the
     // summed (dry + reverb tail) signal.
     this.reverbReturnGain.connect(this.limiter);
-    this.limiter.connect(this.output);
+
+    // --- Tremolo stage ---------------------------------------------------
+    // Inserted between the master limiter and the final output GainNode so
+    // it modulates the entire audible mix (robot, clean, reverb tail).
+    // The recorder taps masterFx.output, so recordings include tremolo.
+    this.lfo = ctx.createOscillator();
+    this.lfo.type = 'sine';
+    this.lfo.frequency.value = this.opts.tremoloRateHz;
+
+    this.tremoloDepthGain = ctx.createGain();
+    this.tremoloDepthGain.gain.value = 0; // depth = 0 initial -> no modulation
+
+    this.tremoloGain = ctx.createGain();
+    this.tremoloGain.gain.value = 1; // base level for depth = 0 (flat)
+
+    // LFO modulates tremoloGain.gain at audio rate. AudioNode->AudioParam
+    // connections ADD to the param's static value, so at depth=0 the
+    // depth-gain is 0, LFO contribution is 0, and tremoloGain.gain stays
+    // exactly at 1 -- perfectly flat as the spec requires.
+    this.lfo.connect(this.tremoloDepthGain);
+    this.tremoloDepthGain.connect(this.tremoloGain.gain);
+    this.lfo.start();
+
+    this.limiter.connect(this.tremoloGain).connect(this.output);
   }
 
   /**
@@ -384,6 +424,38 @@ export class MasterFX {
   /** Current short/long IR crossfade position (0 = short, 1 = long). */
   get tailLength(): number {
     return this.longPathGain.gain.value;
+  }
+
+  /**
+   * Set tremolo depth in [0, 1]. Smooth-ramped (20ms TC) so depth changes
+   * never click. depth=0 cleanly converges to "perfectly flat" because the
+   * depth-gain ramps to 0 and the LFO contribution to tremoloGain.gain
+   * vanishes.
+   */
+  setTremoloDepth(depth: number): void {
+    const d = Math.max(0, Math.min(1, depth));
+    const t = this.ctx.currentTime;
+    const tc = 0.02;
+    // Base value: dips downward as depth grows, top of swing stays at 1.
+    this.tremoloGain.gain.setTargetAtTime(1 - d / 2, t, tc);
+    // LFO swing amplitude: peak-to-peak = depth, so depth/2 each direction.
+    this.tremoloDepthGain.gain.setTargetAtTime(d / 2, t, tc);
+  }
+
+  /** Set the LFO rate (Hz). Smooth-ramped to avoid frequency clicks. */
+  setLfoRate(rateHz: number): void {
+    const r = Math.max(0.1, rateHz);
+    this.lfo.frequency.setTargetAtTime(r, this.ctx.currentTime, 0.05);
+  }
+
+  /** Current effective tremolo depth in [0, 1] (reverse of setTremoloDepth). */
+  get tremoloDepthValue(): number {
+    return Math.max(0, Math.min(1, (1 - this.tremoloGain.gain.value) * 2));
+  }
+
+  /** Current LFO rate in Hz. */
+  get lfoRateHz(): number {
+    return this.lfo.frequency.value;
   }
 
   /** Current limiter gain reduction in dB (positive number = reduction amount). */

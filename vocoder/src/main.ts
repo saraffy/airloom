@@ -97,6 +97,7 @@ const meterNote = document.getElementById('meter-note') as HTMLDivElement;
 const meterChord = document.getElementById('meter-chord') as HTMLDivElement;
 const meterWet = document.getElementById('meter-wet') as HTMLDivElement;
 const meterReverb = document.getElementById('meter-reverb') as HTMLDivElement;
+const meterTremolo = document.getElementById('meter-tremolo') as HTMLDivElement;
 
 // ---------------------------------------------------------------------------
 // State
@@ -125,6 +126,7 @@ let micSampleRate: number | null = null;
 // hand vanishes so reappearance doesn't trigger a stale-derivative spike.
 let smoothRightWristY: OneEuroFilter | null = null;
 let smoothLeftOpenness: OneEuroFilter | null = null;
+let smoothLeftWristY: OneEuroFilter | null = null;
 let smoothHandDistance: OneEuroFilter | null = null;
 
 // Left-hand-openness-driven density (0..1). Carrier always plays the full
@@ -133,6 +135,7 @@ let smoothHandDistance: OneEuroFilter | null = null;
 // 1 = full triad. Smoothed by the one-euro filter so it doesn't zipper.
 let lastDensity = 0;
 let lastReverbSend = 0;
+let lastTremoloDepth = 0;
 // Continuous (pre-snap) MIDI value of the right hand. Used by the
 // on-screen chord map to position its hand marker between rungs.
 let lastRawMidi: number | null = null;
@@ -357,6 +360,8 @@ function updateMeters(): void {
   meterWet.style.width = `${Math.round(lastDensity * 100)}%`;
   // Reverb bar
   meterReverb.style.width = `${Math.round(lastReverbSend * 100)}%`;
+  // Tremolo bar (left-hand y)
+  meterTremolo.style.width = `${Math.round(lastTremoloDepth * 100)}%`;
 }
 
 // ---------------------------------------------------------------------------
@@ -483,10 +488,14 @@ async function start(): Promise<void> {
     masterFx = new MasterFX(audioCtx, MAPPING.masterFx);
 
     // One-euro smoothing filters per continuous feature. Same params for
-    // each since all three are gesture-typed values in [0,1]-ish ranges.
+    // all since they're all gesture-typed values in [0,1]-ish ranges.
     smoothRightWristY = new OneEuroFilter(MAPPING.smoothing);
     smoothLeftOpenness = new OneEuroFilter(MAPPING.smoothing);
+    smoothLeftWristY = new OneEuroFilter(MAPPING.smoothing);
     smoothHandDistance = new OneEuroFilter(MAPPING.smoothing);
+
+    // Apply the configured tremolo rate now (overrides the masterFx default).
+    masterFx.setLfoRate(MAPPING.tremolo.rateHz);
 
     // Audio graph -- latency-optimised (Phase 5+ post-step-3):
     //
@@ -757,11 +766,20 @@ function driveAudio(
     const smOpenness = smoothLeftOpenness!.filter(lf.openness, now);
     const { opennessMin, opennessMax } = MAPPING.density;
     lastDensity = mapRange(smOpenness, opennessMin, opennessMax, 0, 1);
+
+    // Tremolo depth from left wrist Y. Hand HIGH on screen (small y) -> deep
+    // tremolo, hand LOW (large y) -> none. Same one-euro family of smoothing
+    // as the other continuous mappings so the depth doesn't zipper.
+    const smY = smoothLeftWristY!.filter(lf.wristY, now);
+    const { yMin, yMax, depthMax } = MAPPING.tremolo;
+    lastTremoloDepth = mapRange(smY, yMin, yMax, depthMax, 0);
+    masterFx.setTremoloDepth(lastTremoloDepth);
   } else {
     lastLeftFeatures = null;
     smoothLeftOpenness?.reset();
-    // Density held at its last value -- when the hand reappears it picks
-    // up where it left off rather than jumping.
+    smoothLeftWristY?.reset();
+    // Density AND tremolo depth held at their last values -- when the hand
+    // reappears they pick up where they left off rather than jumping.
   }
 
   // -----------------------------------------------------------------------
@@ -1010,6 +1028,10 @@ function updateDebug(
   const tail = masterFx ? masterFx.tailLength : 0;
   lines.push(
     `master: wet=${(fixedWet * 100).toFixed(0)}% (fixed)  reverbSend=${(lastReverbSend * 100).toFixed(0)}%  tail=${(tail * 100).toFixed(0)}% (short↔long)`,
+  );
+  const lfoRate = masterFx ? masterFx.lfoRateHz : MAPPING.tremolo.rateHz;
+  lines.push(
+    `tremolo: depth=${(lastTremoloDepth * 100).toFixed(0)}%  rate=${lfoRate.toFixed(1)}Hz (left wristY)`,
   );
 
   for (let i = 0; i < hands.length; i++) {
