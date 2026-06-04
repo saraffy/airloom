@@ -77,7 +77,77 @@
          ========================================================= -->
     <header class="app-header">
       <span class="app-wordmark">airloom</span>
+      <button
+        id="how-to-toggle"
+        class="how-to-toggle"
+        type="button"
+        aria-expanded="false"
+        aria-controls="how-to-panel"
+      >
+        how to play
+      </button>
     </header>
+
+    <!-- =========================================================
+         HOW-TO-PLAY PANEL -- collapsible side panel. Default
+         hidden; toggled by #how-to-toggle and by Escape. Non-modal
+         (role="region") so it doesn't block the camera/audio.
+         ========================================================= -->
+    <aside
+      id="how-to-panel"
+      class="how-to-panel"
+      role="region"
+      aria-labelledby="how-to-heading"
+      aria-hidden="true"
+    >
+      <div class="how-to-head">
+        <h2 id="how-to-heading">how to play</h2>
+        <button
+          id="how-to-close"
+          class="how-to-close"
+          type="button"
+          aria-label="close instructions"
+        >×</button>
+      </div>
+
+      <p class="how-to-intro">
+        sing, hum, or talk into your mic — airloom reshapes your voice into the
+        instrument. best with headphones, in a quiet room, in chrome.
+      </p>
+
+      <section class="how-to-section">
+        <h3>right hand</h3>
+        <ul>
+          <li>move up / down → pitch (snaps to your key)</li>
+          <li>pinch thumb + index → hear your natural voice</li>
+          <li>out of frame → silence</li>
+        </ul>
+      </section>
+
+      <section class="how-to-section">
+        <h3>left hand</h3>
+        <ul>
+          <li>fist ↔ open palm → single note ↔ full chord</li>
+          <li>raise / lower → tremolo (a volume wobble)</li>
+        </ul>
+      </section>
+
+      <section class="how-to-section">
+        <h3>both hands</h3>
+        <ul>
+          <li>move apart / together → more / less reverb</li>
+        </ul>
+      </section>
+
+      <section class="how-to-section">
+        <h3>extras</h3>
+        <ul>
+          <li>scale &amp; key menus change the mood</li>
+          <li>the side ladder shows the chord you're playing</li>
+          <li>record captures a clip</li>
+        </ul>
+      </section>
+    </aside>
 
     <main id="app">
       <section class="stage">

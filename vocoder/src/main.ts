@@ -1061,9 +1061,51 @@ function updateDebug(
 }
 
 // ---------------------------------------------------------------------------
+// How-to-play panel: toggle, close button, Esc-to-close, ARIA sync.
+// Pure DOM/CSS overlay -- no audio or gesture code touched.
+// ---------------------------------------------------------------------------
+function installHowToPanel(): void {
+  const toggle = document.getElementById('how-to-toggle') as HTMLButtonElement | null;
+  const panel = document.getElementById('how-to-panel') as HTMLElement | null;
+  const closeBtn = document.getElementById('how-to-close') as HTMLButtonElement | null;
+  if (!toggle || !panel || !closeBtn) return;
+
+  const setOpen = (open: boolean): void => {
+    panel.classList.toggle('open', open);
+    toggle.setAttribute('aria-expanded', String(open));
+    panel.setAttribute('aria-hidden', String(!open));
+  };
+
+  toggle.addEventListener('click', () => {
+    const isOpen = panel.classList.contains('open');
+    setOpen(!isOpen);
+    if (!isOpen) {
+      // Just opened: move focus into the panel so keyboard users can
+      // immediately reach the close button / scroll.
+      closeBtn.focus();
+    }
+  });
+
+  closeBtn.addEventListener('click', () => {
+    setOpen(false);
+    // Return focus to the toggle so keyboard nav resumes where it left off.
+    toggle.focus();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && panel.classList.contains('open')) {
+      e.preventDefault();
+      setOpen(false);
+      toggle.focus();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 installScalePickers();
+installHowToPanel();
 
 // Legacy fallback: the original instrument-view Start button is hidden
 // via CSS (#start-btn { display: none }), but the click handler stays
